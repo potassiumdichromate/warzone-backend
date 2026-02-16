@@ -604,6 +604,11 @@ exports.getAchieveQuestByType = async (req, res) => {
       if(matches.length > 0 && matches[0].progress >= 3) {
         completed = true;
       }
+      else if(type == 0 || type == '0') {   
+  reward = 'Mass Annihilation'
+  if(matches.length > 0 && matches[0].progress >= 200) {
+    completed = true;
+  }
     }
 
 
