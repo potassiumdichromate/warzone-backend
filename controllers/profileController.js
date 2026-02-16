@@ -576,7 +576,12 @@ exports.getAchieveQuestByType = async (req, res) => {
     }
 
     const profile = await getWalletProfile(walletAddress);
-    const all = Array.isArray(profile.PlayerAchievementData) ? profile.PlayerAchievementData : [];
+    // FIX: convert object → array
+const all = profile.PlayerAchievementData
+  ? Object.values(profile.PlayerAchievementData)
+  : [];
+
+const matches = all.filter(q => Number(q.type) === type);
 
     // Return ALL quests matching this type (in case multiples exist)
 
