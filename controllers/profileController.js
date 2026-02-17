@@ -585,8 +585,6 @@ const matches = all.filter(q => Number(q.type) === type);
 
     // Return ALL quests matching this type (in case multiples exist)
 
-    const matches = all.filter(q => Number(q.type) === type);
-
     let completed = false;
     let reward = '';
 
@@ -609,11 +607,12 @@ const matches = all.filter(q => Number(q.type) === type);
       if(matches.length > 0 && matches[0].progress >= 3) {
         completed = true;
       }
-      else if(type == 0 || type == '0') {   
-  reward = 'Mass Annihilation'
-  if(matches.length > 0 && matches[0].progress >= 200) {
-    completed = true;
-  }
+    }
+    else if(type == 0 || type == '0') {   
+      reward = 'Mass Annihilation'
+      if(matches.length > 0 && matches[0].progress >= 200) {
+        completed = true;
+      }
     }
 
 
