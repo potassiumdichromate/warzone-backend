@@ -1,7 +1,26 @@
 const { ethers } = require('ethers');
+const fs = require('fs');
+const path = require('path');
 const PlayerProfile = require('../models/PlayerProfile');
 const IAPPurchase = require('../models/IAPPurchase');
-const CONTRACT_ABI = require('../../shared/abi/WarzoneInAppPurchase.json');
+
+function loadContractAbi() {
+  const candidates = [
+    path.resolve(__dirname, '../../shared/abi/WarzoneInAppPurchase.json'),
+    path.resolve(__dirname, '../../warzonewarrior/src/abi/WarzoneInAppPurchase.json'),
+    path.resolve(__dirname, '../../warzone-warriors-frontend/src/abi/WarzoneInAppPurchase.json'),
+  ];
+
+  const abiPath = candidates.find((p) => fs.existsSync(p));
+  if (!abiPath) {
+    throw new Error(
+      `WarzoneInAppPurchase ABI not found. Tried: ${candidates.join(', ')}`
+    );
+  }
+  return require(abiPath);
+}
+
+const CONTRACT_ABI = loadContractAbi();
 
 const COIN_PACKS = new Map([
   ['100', 100],

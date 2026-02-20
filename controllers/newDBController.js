@@ -3,8 +3,15 @@ const mongoose = require('mongoose');
 const PlayerProfile = require('../models/PlayerProfile');
 const WarzoneNameWallet = require('../models/nameWallet');
 
-const MYDBURI = "mongodb://admin:bulletstorm_ku1t_games@178.159.43.214:27017/new-warzone?authSource=admin"
-const NEW_DB_NAME = process.env.NEW_MONGO_DB_NAME || process.env.MONGO_DB_NAME || 'new-warzone';
+const EVENT_DB_URI =
+  process.env.EVENT_DB_URI ||
+  process.env.NEW_MONGO_URI ||
+  process.env.NEW_DB_URI;
+const EVENT_DB_NAME =
+  process.env.EVENT_DB_NAME ||
+  process.env.NEW_MONGO_DB_NAME ||
+  process.env.MONGO_DB_NAME ||
+  'new-warzone';
 
 let newDbConn;
 let AltProfile;
@@ -14,13 +21,18 @@ async function getAltModels() {
   if (AltProfile && AltNameWallet) return { AltProfile, AltNameWallet };
 
   if (!newDbConn) {
-    newDbConn = await mongoose.createConnection(MYDBURI, {
+    if (!EVENT_DB_URI) {
+      throw new Error('EVENT_DB_URI is not configured');
+    }
+
+    newDbConn = mongoose.createConnection(EVENT_DB_URI, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
-      dbName: NEW_DB_NAME,
+      dbName: EVENT_DB_NAME,
     });
     newDbConn.on('connected', () => console.log('[newDB] connected'));
     newDbConn.on('error', (err) => console.error('[newDB] connection error:', err));
+    await newDbConn.asPromise();
   }
 
   // Reuse existing schemas on this separate connection

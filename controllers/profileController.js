@@ -11,6 +11,42 @@ const { request } = require('http');
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
+const SUPPORTED_WALLET_PROVIDER_TYPES = new Set([
+  'metamask',
+  'coinbase_wallet',
+  'base_account',
+  'rainbow',
+  'phantom',
+  'zerion',
+  'cryptocom',
+  'uniswap',
+  'okx_wallet',
+  'bitget_wallet',
+  'universal_profile',
+]);
+
+function normalizeWalletProviderType(rawType) {
+  if (!rawType) return null;
+  const normalized = String(rawType).trim().toLowerCase();
+  if (!normalized) return null;
+
+  // Backward-compatible aliases seen in wallet SDKs.
+  if (normalized === 'bitget') return 'bitget_wallet';
+  if (normalized === 'okx') return 'okx_wallet';
+
+  return SUPPORTED_WALLET_PROVIDER_TYPES.has(normalized) ? normalized : normalized;
+}
+
+function extractLoginWalletAddress(payload) {
+  return (
+    payload?.walletAddress ||
+    payload?.wallet?.address ||
+    payload?.privyMetaData?.walletAddress ||
+    payload?.privyMetaData?.address ||
+    null
+  );
+}
+
 // Somnia mainnet / chain settings (env-driven, read lazily)
 function readEnv(name, fallback) {
   const v = process.env[name];
@@ -472,7 +508,16 @@ exports.getName = async (req, res) => {
 
 exports.login = async (req, res) => {
   try {
-    const { walletAddress } = req.body;
+    const walletAddress = extractLoginWalletAddress(req.body);
+    const providerType = normalizeWalletProviderType(
+      req.body?.walletProviderType ||
+      req.body?.walletType ||
+      req.body?.privyMetaData?.type ||
+      req.body?.wallet?.walletClientType
+    );
+    const providerName = req.body?.providerName || req.body?.privyMetaData?.providerName || null;
+    const privyUserId = req.body?.privyUserId || req.body?.privyMetaData?.privyUserId || null;
+
     if (!walletAddress) {
       return res.status(400).json({ success: false, message: 'Wallet address is required' });
     }
@@ -483,9 +528,17 @@ exports.login = async (req, res) => {
     if (isNewUser) {
       profile = new PlayerProfile({ walletAddress, ...defaultData });
       normalizeProfile(profile);
+      profile.walletProviderType = providerType;
+      profile.walletProviderName = providerName;
+      profile.privyUserId = privyUserId;
+      profile.lastLoginAt = new Date();
       await profile.save();
     } else {
       normalizeProfile(profile);
+      profile.walletProviderType = providerType || profile.walletProviderType || null;
+      profile.walletProviderName = providerName || profile.walletProviderName || null;
+      profile.privyUserId = privyUserId || profile.privyUserId || null;
+      profile.lastLoginAt = new Date();
       await profile.save();
     }
 
@@ -505,7 +558,12 @@ exports.login = async (req, res) => {
       success: true,
       message: isNewUser ? 'User registered successfully' : 'Login successful',
       token,
-      user: { walletAddress: profile.walletAddress, isNewUser },
+      user: {
+        walletAddress: profile.walletAddress,
+        walletProviderType: profile.walletProviderType,
+        walletProviderName: profile.walletProviderName,
+        isNewUser,
+      },
       chain: chainResult,
     });
   } catch (error) {
