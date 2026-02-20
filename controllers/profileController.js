@@ -47,6 +47,21 @@ function extractLoginWalletAddress(payload) {
   );
 }
 
+function normalizeWalletAddress(walletAddress) {
+  return String(walletAddress || '').trim().toLowerCase();
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function walletAddressCaseInsensitiveQuery(walletAddress) {
+  const normalized = normalizeWalletAddress(walletAddress);
+  return {
+    walletAddress: { $regex: new RegExp(`^${escapeRegex(normalized)}$`, 'i') }
+  };
+}
+
 // Somnia mainnet / chain settings (env-driven, read lazily)
 function readEnv(name, fallback) {
   const v = process.env[name];
@@ -259,9 +274,10 @@ function normalizeProfile(obj) {
 }
 
 const getWalletProfile = async (walletAddress) => {
-  if (!walletAddress) throw new Error('walletAddress required');
+  const normalizedWalletAddress = normalizeWalletAddress(walletAddress);
+  if (!normalizedWalletAddress) throw new Error('walletAddress required');
 
-  let profile = await PlayerProfile.findOne({ walletAddress });
+  let profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
 
   if (!profile) {
     profile = new PlayerProfile({ walletAddress, ...defaultData });
@@ -288,7 +304,8 @@ exports.saveProfile = async (req, res) => {
       return res.json(profile);
     }
 
-    let profile = await PlayerProfile.findOne({ walletAddress });
+    const normalizedWalletAddress = normalizeWalletAddress(walletAddress);
+    let profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
     if (!profile) profile = new PlayerProfile({ walletAddress, ...defaultData });
 
     data.PlayerCampaignProgress = {};
@@ -522,7 +539,8 @@ exports.login = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Wallet address is required' });
     }
 
-    let profile = await PlayerProfile.findOne({ walletAddress });
+    const normalizedWalletAddress = normalizeWalletAddress(walletAddress);
+    let profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
     const isNewUser = !profile;
 
     if (isNewUser) {
