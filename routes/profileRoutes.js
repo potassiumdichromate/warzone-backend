@@ -4,7 +4,6 @@ const { getProfile, saveProfile, getLeaderboard, checkNameExistance, getDailyQue
   getDailyQuestByType, getAchieveQuestByType, saveName, getName, login } = require('../controllers/profileController');
 const { getSpecificDBLeaderboard } = require('../controllers/newDBController');
 const verifyUser = require('../routes/middleware/verifyUser');
-const rateLimiter = require('../routes/middleware/rateLimiter');
 
 const iapController = require('../controllers/iap.controller');
 // In-memory pricing exposure for store UI (Coins/Gems only)
@@ -13,17 +12,8 @@ const iapController = require('../controllers/iap.controller');
 router.get('/', getProfile);
 router.post('/', saveProfile);
 router.get('/dailyQuests', getDailyQuests);
-// Apply a lightweight per-IP rate limit on this route
-router.get(
-  '/dailyQuests/type/:type',
-  rateLimiter({ windowMs: 60 * 1000, max: 20 }), // 20 requests per minute per IP
-  getDailyQuestByType
-);
-router.get(
-  '/achieveQuests/type/:type',
-  rateLimiter({ windowMs: 60 * 1000, max: 20 }), // 20 requests per minute per IP
-  getAchieveQuestByType
-);
+router.get('/dailyQuests/type/:type', getDailyQuestByType);
+router.get('/achieveQuests/type/:type', getAchieveQuestByType);
 router.get('/leaderboard', getLeaderboard);
 router.get('/leaderboard/allTime',getSpecificDBLeaderboard)
 router.post('/name', checkNameExistance);
