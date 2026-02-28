@@ -82,11 +82,30 @@ function readEnv(name, fallback) {
 
 function getChainConfig() {
   const rpcUrl = readEnv('SOMNIA_RPC_URL', 'https://api.infra.mainnet.somnia.network');
+  const rpcUrlsRaw = readEnv('SOMNIA_RPC_URLS', '');
+  const rpcUrls = (rpcUrlsRaw ? rpcUrlsRaw.split(',') : [rpcUrl])
+    .map(s => String(s).trim())
+    .filter(Boolean);
   const contractAddress = readEnv('GAME_CONTRACT_ADDRESS', '0xEA4450c195ECFd63A6d7e35768fF351e748317cB');
   const ownerPkRaw = readEnv('GAME_OWNER_PRIVATE_KEY', readEnv('OWNER_PRIVATE_KEY', '0x4612ee7e7af911a0ddb516f345962f51d0de28243c1232499cdc28545b431087'));
   const waitConfirmations = Number(readEnv('WAIT_FOR_CONFIRMATIONS', '1'));
   const gasPriceGwei = readEnv('GAS_PRICE_GWEI', '');
-  return { rpcUrl, contractAddress, ownerPkRaw, waitConfirmations, gasPriceGwei };
+  const rpcTimeoutMs = Number(readEnv('SOMNIA_RPC_TIMEOUT_MS', '15000'));
+  const rpcRetries = Number(readEnv('SOMNIA_RPC_RETRIES', '3'));
+  const chainId = Number(readEnv('SOMNIA_CHAIN_ID', '5031'));
+  const networkName = readEnv('SOMNIA_NETWORK_NAME', 'somnia');
+  return {
+    rpcUrl,
+    rpcUrls,
+    contractAddress,
+    ownerPkRaw,
+    waitConfirmations,
+    gasPriceGwei,
+    rpcTimeoutMs,
+    rpcRetries,
+    chainId,
+    networkName,
+  };
 }
 
 const GAME_ABI = [
@@ -98,15 +117,95 @@ const GAME_ABI = [
 ];
 
 let _gameContract;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientRpcError(err) {
+  const code =
+    err?.code ||
+    err?.error?.code ||
+    err?.serverError?.code ||
+    err?.serverError?.errno ||
+    err?.errno;
+
+  const text = [
+    err?.reason,
+    err?.message,
+    err?.error?.message,
+    err?.serverError?.message,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  return (
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT' ||
+    code === 'EAI_AGAIN' ||
+    code === 'ENOTFOUND' ||
+    code === 'UND_ERR_CONNECT_TIMEOUT' ||
+    text.includes('missing response') ||
+    text.includes('socket hang up') ||
+    text.includes('disconnected') ||
+    text.includes('timeout')
+  );
+}
+
+class RetryingJsonRpcProvider extends ethers.providers.StaticJsonRpcProvider {
+  constructor(url, network, opts = {}) {
+    const timeout = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 15000;
+    super({ url, timeout }, network);
+    this._rpcRetries = Number.isFinite(opts.retries) ? Math.max(0, opts.retries) : 3;
+    this._rpcRetryBaseMs = Number.isFinite(opts.retryBaseMs) ? Math.max(0, opts.retryBaseMs) : 250;
+    this._rpcRetryMaxMs = Number.isFinite(opts.retryMaxMs) ? Math.max(0, opts.retryMaxMs) : 4000;
+  }
+
+  async send(method, params) {
+    const maxAttempts = this._rpcRetries + 1;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await super.send(method, params);
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientRpcError(err) || attempt === maxAttempts) throw err;
+
+        const exp = Math.min(this._rpcRetryMaxMs, this._rpcRetryBaseMs * (2 ** (attempt - 1)));
+        const jitter = Math.floor(Math.random() * 100);
+        const delayMs = exp + jitter;
+        console.warn('[rpc retry]', { method, attempt, maxAttempts, delayMs, code: err?.code || err?.serverError?.code });
+        await sleep(delayMs);
+      }
+    }
+    throw lastErr;
+  }
+}
+
 function getGameContract() {
   if (_gameContract) return _gameContract;
 
-  const { rpcUrl, contractAddress, ownerPkRaw } = getChainConfig();
-  if (!rpcUrl) throw new Error('Missing SOMNIA_RPC_URL');
+  const { rpcUrls, contractAddress, ownerPkRaw, rpcTimeoutMs, rpcRetries, chainId, networkName } = getChainConfig();
+  if (!rpcUrls?.length) throw new Error('Missing SOMNIA_RPC_URL(S)');
   if (!contractAddress) throw new Error('Missing GAME_CONTRACT_ADDRESS');
   if (!ownerPkRaw) throw new Error('Missing GAME_OWNER_PRIVATE_KEY');
+  if (!Number.isFinite(chainId)) throw new Error('Missing/invalid SOMNIA_CHAIN_ID');
 
-  const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+  const network = { chainId, name: networkName || 'somnia' };
+  const providers = rpcUrls.map((url) => new RetryingJsonRpcProvider(url, network, { timeoutMs: rpcTimeoutMs, retries: rpcRetries }));
+  const provider =
+    providers.length === 1
+      ? providers[0]
+      : new ethers.providers.FallbackProvider(
+          providers.map((p, i) => ({
+            provider: p,
+            priority: i + 1,
+            weight: 1,
+            stallTimeout: rpcTimeoutMs,
+          })),
+          1
+        );
   const pkTrim = ownerPkRaw.trim();
   const pk = pkTrim.startsWith('0x') ? pkTrim : `0x${pkTrim}`;
   const wallet = new ethers.Wallet(pk, provider);
@@ -175,7 +274,7 @@ async function sendContractTx(method, args = [], overrides = {}) {
   const signer = contract.signer;
   const provider = contract.provider || signer.provider;
   const from = (await signer.getAddress()).toLowerCase();
-  const { chainId } = await provider.getNetwork();
+  const { chainId } = getChainConfig();
   const dbNonce = useDbNonceManager();
 
   return withNonceLock(async () => {
