@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const PlayerProfile = require('../models/PlayerProfile');
 const WarzoneNameWallet = require('../models/nameWallet');
 const NameCounter = require('../models/nameCounter');
+const NonceState = require('../models/NonceState');
 const { request } = require('http');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
@@ -151,24 +152,62 @@ function isNonceConflictError(err) {
   );
 }
 
+function useDbNonceManager() {
+  const raw = readEnv('USE_DB_NONCE_MANAGER', 'true');
+  return raw !== 'false' && raw !== '0';
+}
+
+async function getChainNonceFloor({ provider, address }) {
+  const [pending, latest] = await Promise.all([
+    provider.getTransactionCount(address, 'pending'),
+    provider.getTransactionCount(address, 'latest'),
+  ]);
+
+  const floor = Math.max(Number(pending), Number(latest));
+  if (!Number.isSafeInteger(floor)) {
+    throw new Error(`Unsafe nonce value returned from RPC: pending=${pending} latest=${latest}`);
+  }
+  return floor;
+}
+
 async function sendContractTx(method, args = [], overrides = {}) {
   const contract = getGameContract();
   const signer = contract.signer;
+  const provider = contract.provider || signer.provider;
+  const from = (await signer.getAddress()).toLowerCase();
+  const { chainId } = await provider.getNetwork();
+  const dbNonce = useDbNonceManager();
 
   return withNonceLock(async () => {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        if (_nextNonce == null) {
-          _nextNonce = await signer.getTransactionCount('pending');
+        const chainNonceFloor = await getChainNonceFloor({ provider, address: from });
+
+        let nonce;
+        if (dbNonce) {
+          nonce = await NonceState.allocateNonce({ address: from, chainId, chainNonceFloor });
+        } else {
+          if (_nextNonce == null) _nextNonce = chainNonceFloor;
+          if (_nextNonce < chainNonceFloor) _nextNonce = chainNonceFloor;
+          nonce = _nextNonce;
         }
 
-        const nonce = _nextNonce;
         const tx = await contract[method](...args, { ...overrides, nonce });
-        _nextNonce = nonce + 1;
+        if (!dbNonce) _nextNonce = nonce + 1;
         return tx;
       } catch (err) {
         if (isNonceConflictError(err) && attempt < 3) {
-          _nextNonce = await signer.getTransactionCount('pending');
+          try {
+            const chainNonceFloor = await getChainNonceFloor({ provider, address: from });
+            if (dbNonce) {
+              await NonceState.bumpFloor({ address: from, chainId, chainNonceFloor });
+            } else {
+              _nextNonce = chainNonceFloor;
+            }
+          } catch (bumpErr) {
+            console.warn('[sendContractTx] nonce bump failed:', bumpErr?.message || bumpErr);
+            _nextNonce = null;
+          }
           continue;
         }
         throw err;
