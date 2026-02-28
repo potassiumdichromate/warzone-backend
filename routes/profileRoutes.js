@@ -4,16 +4,63 @@ const { getProfile, saveProfile, getLeaderboard, checkNameExistance, getDailyQue
   getDailyQuestByType, getAchieveQuestByType, saveName, getName, login } = require('../controllers/profileController');
 const { getSpecificDBLeaderboard } = require('../controllers/newDBController');
 const verifyUser = require('../routes/middleware/verifyUser');
+const rateLimiter = require('../routes/middleware/rateLimiter');
 
 const iapController = require('../controllers/iap.controller');
 // In-memory pricing exposure for store UI (Coins/Gems only)
+
+function getClientIp(req) {
+  const xForwardedFor = req?.headers?.['x-forwarded-for'];
+  const xRealIp = req?.headers?.['x-real-ip'];
+  const forwarded = Array.isArray(xForwardedFor) ? xForwardedFor[0] : xForwardedFor;
+  const realIp = Array.isArray(xRealIp) ? xRealIp[0] : xRealIp;
+  const firstForwardedIp = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : '';
+  return firstForwardedIp || realIp || req?.ip || req?.socket?.remoteAddress || 'unknown';
+}
+
+function normalizeWallet(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function validateWalletQuery(req, res, next) {
+  const wallet = normalizeWallet(req.query?.walletAddress);
+  if (!wallet) {
+    return res.status(400).json({ success: false, error: 'walletAddress is required' });
+  }
+  if (!/^0x[a-f0-9]{40}$/.test(wallet)) {
+    return res.status(400).json({ success: false, error: 'walletAddress must be a valid EVM address' });
+  }
+  next();
+}
+
+function validateQuestType(req, res, next) {
+  const type = Number(req.params?.type);
+  if (!Number.isFinite(type)) {
+    return res.status(400).json({ success: false, error: 'type must be a number' });
+  }
+  next();
+}
+
+const questIpLimiter = rateLimiter({
+  windowMs: 60_000,
+  max: Number(process.env.QUEST_RATE_LIMIT_PER_IP || 120),
+  keyGenerator: (req) => `quest-ip:${getClientIp(req)}`,
+  message: 'Too many quest requests from this IP, please try again later.',
+});
+
+const questWalletLimiter = rateLimiter({
+  windowMs: 60_000,
+  max: Number(process.env.QUEST_RATE_LIMIT_PER_WALLET || 40),
+  keyGenerator: (req) => `quest-ip-wallet:${getClientIp(req)}:${normalizeWallet(req.query?.walletAddress)}`,
+  message: 'Too many quest requests for this wallet from this IP, please slow down.',
+});
 
 
 router.get('/', getProfile);
 router.post('/', saveProfile);
 router.get('/dailyQuests', getDailyQuests);
-router.get('/dailyQuests/type/:type', getDailyQuestByType);
-router.get('/achieveQuests/type/:type', getAchieveQuestByType);
+router.get('/dailyQuests/type/:type', questIpLimiter, questWalletLimiter, validateWalletQuery, validateQuestType, getDailyQuestByType);
+router.get('/achieveQuests/type/:type', questIpLimiter, questWalletLimiter, validateWalletQuery, validateQuestType, getAchieveQuestByType);
 router.get('/leaderboard', getLeaderboard);
 router.get('/leaderboard/allTime',getSpecificDBLeaderboard)
 router.post('/name', checkNameExistance);
