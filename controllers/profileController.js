@@ -113,6 +113,70 @@ function getGameContract() {
   return _gameContract;
 }
 
+let _nonceLock = Promise.resolve();
+let _nextNonce = null;
+
+async function withNonceLock(task) {
+  const previous = _nonceLock;
+  let release;
+  _nonceLock = new Promise((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+  }
+}
+
+function isNonceConflictError(err) {
+  const text = [
+    err?.code,
+    err?.reason,
+    err?.message,
+    err?.error?.message,
+    err?.error?.body,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  return (
+    err?.code === 'NONCE_EXPIRED' ||
+    text.includes('nonce too low') ||
+    text.includes('nonce has already been used') ||
+    text.includes('already known') ||
+    text.includes('replacement transaction underpriced')
+  );
+}
+
+async function sendContractTx(method, args = [], overrides = {}) {
+  const contract = getGameContract();
+  const signer = contract.signer;
+
+  return withNonceLock(async () => {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        if (_nextNonce == null) {
+          _nextNonce = await signer.getTransactionCount('pending');
+        }
+
+        const nonce = _nextNonce;
+        const tx = await contract[method](...args, { ...overrides, nonce });
+        _nextNonce = nonce + 1;
+        return tx;
+      } catch (err) {
+        if (isNonceConflictError(err) && attempt < 3) {
+          _nextNonce = await signer.getTransactionCount('pending');
+          continue;
+        }
+        throw err;
+      }
+    }
+  });
+}
+
 function gasOverrides() {
   const { gasPriceGwei } = getChainConfig();
   if (gasPriceGwei && !Number.isNaN(Number(gasPriceGwei))) {
@@ -165,7 +229,7 @@ async function registerAndStartOnChain(walletAddress, displayName = '') {
 
     if (!registered) {
       result.attemptedRegister = true;
-      const tx = await contract.registerUser(walletAddress, displayName, overrides);
+      const tx = await sendContractTx('registerUser', [walletAddress, displayName], overrides);
       result.registerTxHash = tx.hash;
       const { waitConfirmations } = getChainConfig();
       if (waitConfirmations >= 0) await tx.wait(waitConfirmations);
@@ -182,7 +246,7 @@ async function registerAndStartOnChain(walletAddress, displayName = '') {
 
     if (!activeId) {
       result.attemptedStart = true;
-      const tx2 = await contract.startGameFor(walletAddress, overrides);
+      const tx2 = await sendContractTx('startGameFor', [walletAddress], overrides);
       result.startTxHash = tx2.hash;
       const { waitConfirmations: wait2 } = getChainConfig();
       if (wait2 >= 0) await tx2.wait(wait2);
@@ -222,7 +286,7 @@ async function endGameIfActive(walletAddress) {
     }
 
     result.attemptedEnd = true;
-    const tx = await contract.endGameFor(walletAddress, overrides);
+    const tx = await sendContractTx('endGameFor', [walletAddress], overrides);
     result.endTxHash = tx.hash;
     const { waitConfirmations } = getChainConfig();
     if (waitConfirmations >= 0) await tx.wait(waitConfirmations);
