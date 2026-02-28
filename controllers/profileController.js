@@ -62,6 +62,15 @@ function walletAddressCaseInsensitiveQuery(walletAddress) {
   };
 }
 
+function getClientIp(req) {
+  const xForwardedFor = req?.headers?.['x-forwarded-for'];
+  const xRealIp = req?.headers?.['x-real-ip'];
+  const forwarded = Array.isArray(xForwardedFor) ? xForwardedFor[0] : xForwardedFor;
+  const realIp = Array.isArray(xRealIp) ? xRealIp[0] : xRealIp;
+  const firstForwardedIp = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : '';
+  return firstForwardedIp || realIp || req?.ip || req?.socket?.remoteAddress || '';
+}
+
 // Somnia mainnet / chain settings (env-driven, read lazily)
 function readEnv(name, fallback) {
   const v = process.env[name];
@@ -376,12 +385,13 @@ exports.getDailyQuestByType = async (req, res) => {
   try {
     const { walletAddress } = req.query;
     const type = Number(req.params.type);
+    const clientIp = getClientIp(req);
 
     res.set('X-Request-Id', requestId);
-    console.log('[getDailyQuestByType] start', { requestId, walletAddress, type, ip: req?.ip });
+    console.log('[getDailyQuestByType] start', { requestId, walletAddress, type, ip: clientIp, reqIp: req?.ip });
 
     if (!walletAddress) {
-      console.warn('[getDailyQuestByType] missing walletAddress', { requestId, ip: req.ip });
+      console.warn('[getDailyQuestByType] missing walletAddress', { requestId, ip: clientIp, reqIp: req.ip });
       return res.status(400).json({ success: false, error: "walletAddress is required", requestId });
     }
     if (!Number.isFinite(type)) {
@@ -596,12 +606,13 @@ exports.getAchieveQuestByType = async (req, res) => {
   try {
     const { walletAddress } = req.query;
     const type = Number(req.params.type);
+    const clientIp = getClientIp(req);
 
     res.set('X-Request-Id', requestId);
-    console.log('[getAchieveQuestByType] start', { requestId, walletAddress, type, ip: req?.ip });
+    console.log('[getAchieveQuestByType] start', { requestId, walletAddress, type, ip: clientIp, reqIp: req?.ip });
 
     if (!walletAddress) {
-      console.warn('[getAchieveQuestByType] missing walletAddress', { requestId, ip: req.ip });
+      console.warn('[getAchieveQuestByType] missing walletAddress', { requestId, ip: clientIp, reqIp: req.ip });
       return res.status(400).json({ success: false, error: "walletAddress is required", requestId });
     }
     if (!Number.isFinite(type)) {

@@ -8,11 +8,19 @@
 
 const buckets = new Map();
 
+function getClientIp(req) {
+  const xForwardedFor = req?.headers?.['x-forwarded-for'];
+  const xRealIp = req?.headers?.['x-real-ip'];
+  const forwarded = Array.isArray(xForwardedFor) ? xForwardedFor[0] : xForwardedFor;
+  const realIp = Array.isArray(xRealIp) ? xRealIp[0] : xRealIp;
+  const firstForwardedIp = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : '';
+  return firstForwardedIp || realIp || req?.ip || req?.socket?.remoteAddress || 'global';
+}
+
 function rateLimiter(options = {}) {
   const windowMs = Number(options.windowMs ?? 60_000); // default 1 minute
   const max = Number(options.max ?? 60); // default 60 requests per window
-  const keyGenerator =
-    options.keyGenerator || ((req) => req.ip || req.headers['x-forwarded-for'] || 'global');
+  const keyGenerator = options.keyGenerator || ((req) => getClientIp(req));
   const message = options.message || 'Too many requests, please try again later.';
 
   return (req, res, next) => {

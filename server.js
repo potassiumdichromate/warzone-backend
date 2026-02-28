@@ -7,6 +7,19 @@ dotenv.config();
 const profileRoutes = require('./routes/profileRoutes');
 const app = express();
 
+// Trust reverse proxy headers so req.ip resolves the real client IP.
+// Default is 1 hop (common with Nginx/Cloudflare -> Node).
+const trustProxyEnv = String(process.env.TRUST_PROXY ?? '1').trim().toLowerCase();
+if (trustProxyEnv === 'true') {
+  app.set('trust proxy', true);
+} else if (trustProxyEnv === 'false') {
+  app.set('trust proxy', false);
+} else if (!Number.isNaN(Number(trustProxyEnv))) {
+  app.set('trust proxy', Number(trustProxyEnv));
+} else {
+  app.set('trust proxy', trustProxyEnv);
+}
+
 const allowedOrigins = [
   'https://www.warzonewarriors.xyz',
   'https://warzonewarriors.xyz',
