@@ -6,7 +6,12 @@ const IAPPurchase = require('../models/IAPPurchase');
 
 function loadContractAbi() {
   const candidates = [
+    path.resolve(__dirname, '../shared/WarzoneInAppPurchase.json'),
+    path.resolve(__dirname, '../shared/abi/WarzoneInAppPurchase.json'),
     path.resolve(__dirname, '../../shared/abi/WarzoneInAppPurchase.json'),
+    path.resolve(__dirname, '../../shared/WarzoneInAppPurchase.json'),
+    path.resolve(process.cwd(), 'shared/WarzoneInAppPurchase.json'),
+    path.resolve(process.cwd(), 'shared/abi/WarzoneInAppPurchase.json'),
     path.resolve(__dirname, '../../warzonewarrior/src/abi/WarzoneInAppPurchase.json'),
     path.resolve(__dirname, '../../warzone-warriors-frontend/src/abi/WarzoneInAppPurchase.json'),
   ];
