@@ -14,10 +14,6 @@ const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 const PERF_LOGS_ENABLED =
   String(process.env.API_PERF_LOGS ?? 'true').trim().toLowerCase() !== 'false';
 const PERF_SLOW_STEP_MS = Number(process.env.API_SLOW_STEP_MS || 500);
-const ASYNC_CHAIN_ON_LOGIN =
-  String(process.env.ASYNC_CHAIN_ON_LOGIN ?? 'true').trim().toLowerCase() !== 'false';
-const ASYNC_CHAIN_ON_SAVE_PROFILE =
-  String(process.env.ASYNC_CHAIN_ON_SAVE_PROFILE ?? 'true').trim().toLowerCase() !== 'false';
 
 function createPerfLogger(scope, meta = {}) {
   const start = process.hrtime.bigint();
@@ -600,8 +596,12 @@ const getWalletProfile = async (walletAddress) => {
     if (profile.PlayerCampaignProgress == null) profile.PlayerCampaignProgress = {};
     if (profile.PlayerCampaignStageProgress == null) profile.PlayerCampaignStageProgress = {};
     normalizeProfile(profile);
-    await profile.save();
-    perf.step('normalize_and_save');
+    if (profile.isModified()) {
+      await profile.save();
+      perf.step('normalize_and_save');
+    } else {
+      perf.step('normalize_only');
+    }
   }
   perf.done();
   return profile;
@@ -639,27 +639,17 @@ exports.saveProfile = async (req, res) => {
     await profile.save();
     perf.step('profile_save');
 
-    let chainEnd = {
-      attemptedEnd: false,
-      endTxHash: null,
-      notes: ['endGameIfActive scheduled asynchronously'],
-    };
-    if (ASYNC_CHAIN_ON_SAVE_PROFILE) {
-      runInBackground(
-        () => endGameIfActive(walletAddress),
-        'saveProfile.endGameIfActive',
-        { walletAddress },
-      );
-      perf.step('endGameIfActive_scheduled_async');
-    } else {
-      chainEnd = await endGameIfActive(walletAddress);
-      perf.step('endGameIfActive');
-    }
+    runInBackground(
+      () => endGameIfActive(walletAddress),
+      'saveProfile.endGameIfActive',
+      { walletAddress },
+    );
+    perf.step('endGameIfActive_scheduled_async');
 
-    const fresh = await getWalletProfile(walletAddress);
-    perf.step('getWalletProfile_refresh');
+    const responseProfile = profile.toObject();
+    perf.step('prepare_response');
     perf.done({ shouldUpdate: false });
-    return res.json({ ...fresh, chain: chainEnd });
+    return res.json(responseProfile);
   } catch (error) {
     console.error('Error in saveProfile:', error);
     if (error?.name === 'ValidationError' || error?.name === 'CastError') {
@@ -914,27 +904,12 @@ exports.login = async (req, res) => {
       perf.step('update_profile');
     }
 
-    let chainResult = {
-      attemptedRegister: false,
-      registerTxHash: null,
-      attemptedStart: false,
-      startTxHash: null,
-      notes: ['registerAndStartOnChain scheduled asynchronously'],
-    };
-    if (ASYNC_CHAIN_ON_LOGIN) {
-      runInBackground(
-        () => registerAndStartOnChain(walletAddress, ''),
-        'login.registerAndStartOnChain',
-        { walletAddress: normalizedWalletAddress },
-      );
-      perf.step('registerAndStartOnChain_scheduled_async');
-    } else {
-      chainResult = await registerAndStartOnChain(walletAddress, '');
-      perf.step('registerAndStartOnChain', {
-        attemptedRegister: chainResult?.attemptedRegister,
-        attemptedStart: chainResult?.attemptedStart,
-      });
-    }
+    runInBackground(
+      () => registerAndStartOnChain(walletAddress, ''),
+      'login.registerAndStartOnChain',
+      { walletAddress: normalizedWalletAddress },
+    );
+    perf.step('registerAndStartOnChain_scheduled_async');
 
     const token = jwt.sign({ walletAddress }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
     perf.step('jwt_sign');
@@ -958,7 +933,6 @@ exports.login = async (req, res) => {
         walletProviderName: profile.walletProviderName,
         isNewUser,
       },
-      chain: chainResult,
     });
   } catch (error) {
     console.error('Login error:', error);

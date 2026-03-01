@@ -30,8 +30,10 @@ router.get("/health", (req, res) => {
 });
 
 router.post('/iap/purchase', verifyUser, iapController.purchase);
+router.get('/iap/purchase-status', verifyUser, iapController.getPurchaseStatus);
 // Legacy alias for FE compatibility
 router.post('/api/v1/player/iap/purchase', verifyUser, iapController.purchase);
+router.get('/api/v1/player/iap/purchase-status', verifyUser, iapController.getPurchaseStatus);
 
 // Optional: expose pricing for Coins/Gems so FE can render store
 router.get('/iap/pricing', (req, res) => {

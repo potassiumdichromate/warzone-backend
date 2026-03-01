@@ -80,6 +80,13 @@ const provider =
   CONTRACT_ADDRESS && RPC_URL ? new ethers.providers.JsonRpcProvider(RPC_URL) : null;
 const contractInterface = new ethers.utils.Interface(CONTRACT_ABI);
 const PURCHASE_TOPIC = contractInterface.getEventTopic('Purchase');
+const PURCHASE_STATUS = {
+  PENDING: 'pending_verification',
+  PROCESSING: 'processing',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+};
+const processingPurchases = new Set();
 
 const normalizeAddress = (value) => (value ? value.toLowerCase() : '');
 
@@ -179,6 +186,7 @@ const resolveProduct = (category, product) => {
 
 const buildPurchasePayload = (record) => {
   if (!record) return null;
+  const status = record.metadata?.status || (record.delivered ? PURCHASE_STATUS.COMPLETED : PURCHASE_STATUS.PENDING);
   return {
     category: record.category,
     product: record.product,
@@ -194,8 +202,205 @@ const buildPurchasePayload = (record) => {
     purchaseId: record._id?.toString?.(),
     chainId: record.chainId ?? null,
     blockNumber: record.metadata?.blockNumber ?? null,
+    status,
+    verificationError: record.metadata?.verificationError ?? null,
   };
 };
+
+async function markPurchaseFailed(purchase, message) {
+  const metadata = { ...(purchase.metadata || {}) };
+  metadata.status = PURCHASE_STATUS.FAILED;
+  metadata.verificationError = message;
+  metadata.failedAt = new Date();
+  purchase.metadata = metadata;
+  purchase.delivered = false;
+  await purchase.save();
+}
+
+async function verifyAndDeliverPurchase(purchaseId) {
+  if (!provider || !CONTRACT_ADDRESS) {
+    throw new Error('IAP contract is not configured on the server');
+  }
+
+  const purchase = await IAPPurchase.findById(purchaseId);
+  if (!purchase) return;
+
+  const metadata = { ...(purchase.metadata || {}) };
+  const currentStatus = metadata.status || PURCHASE_STATUS.PENDING;
+  if (currentStatus === PURCHASE_STATUS.COMPLETED || currentStatus === PURCHASE_STATUS.FAILED) {
+    return;
+  }
+
+  metadata.status = PURCHASE_STATUS.PROCESSING;
+  purchase.metadata = metadata;
+  await purchase.save();
+
+  const wallet = normalizeAddress(purchase.walletAddress);
+  const productInfo = resolveProduct(purchase.category, purchase.product);
+
+  const receipt = await provider.getTransactionReceipt(purchase.txHash);
+  if (!receipt) {
+    return await markPurchaseFailed(purchase, 'Transaction receipt not found');
+  }
+  if (receipt.status !== 1) {
+    return await markPurchaseFailed(purchase, 'Transaction failed on-chain');
+  }
+  if (normalizeAddress(receipt.to) !== CONTRACT_ADDRESS) {
+    return await markPurchaseFailed(purchase, 'Transaction target contract mismatch');
+  }
+  if (normalizeAddress(receipt.from) !== wallet) {
+    return await markPurchaseFailed(purchase, 'Transaction sender mismatch');
+  }
+
+  const tx = await provider.getTransaction(purchase.txHash);
+  if (!tx) {
+    return await markPurchaseFailed(purchase, 'Transaction not found');
+  }
+  if (tx.chainId != null && Number(tx.chainId) !== EXPECTED_CHAIN_ID) {
+    return await markPurchaseFailed(
+      purchase,
+      `Unexpected chain id ${tx.chainId}; expected ${EXPECTED_CHAIN_ID}`,
+    );
+  }
+  if (!tx.value.eq(productInfo.priceWei)) {
+    return await markPurchaseFailed(purchase, 'Transaction value mismatch');
+  }
+
+  const purchaseLog = receipt.logs.find(
+    (log) =>
+      normalizeAddress(log.address) === CONTRACT_ADDRESS &&
+      log.topics &&
+      log.topics[0] === PURCHASE_TOPIC,
+  );
+  if (!purchaseLog) {
+    return await markPurchaseFailed(purchase, 'Purchase event not found');
+  }
+
+  const parsedLog = contractInterface.parseLog(purchaseLog);
+  if (normalizeAddress(parsedLog.args.buyer) !== wallet) {
+    return await markPurchaseFailed(purchase, 'Purchase event buyer mismatch');
+  }
+  if (parsedLog.args.orderId !== purchase.orderHash) {
+    return await markPurchaseFailed(purchase, 'Purchase event orderId mismatch');
+  }
+  if (
+    parsedLog.args.category !== purchase.category ||
+    parsedLog.args.product !== purchase.product
+  ) {
+    return await markPurchaseFailed(purchase, 'Purchase event category/product mismatch');
+  }
+  if (!parsedLog.args.priceWei.eq(productInfo.priceWei)) {
+    return await markPurchaseFailed(purchase, 'Purchase event price mismatch');
+  }
+
+  const player = await PlayerProfile.findOne({
+    walletAddress: { $regex: new RegExp(`^${wallet}$`, 'i') },
+  });
+  if (!player) {
+    return await markPurchaseFailed(purchase, 'Player not found');
+  }
+
+  let message = '';
+  let changed = false;
+  let delivered = true;
+  if (purchase.category === 'Coins') {
+    player.PlayerResources = player.PlayerResources || {
+      coin: 0,
+      gem: 0,
+      stamina: 0,
+      medal: 0,
+      tournamentTicket: 0,
+    };
+    player.PlayerResources.coin = (player.PlayerResources.coin ?? 0) + productInfo.amount;
+    message = `Added +${productInfo.amount} coins`;
+    changed = true;
+  } else if (purchase.category === 'Gems') {
+    player.PlayerResources = player.PlayerResources || {
+      coin: 0,
+      gem: 0,
+      stamina: 0,
+      medal: 0,
+      tournamentTicket: 0,
+    };
+    player.PlayerResources.gem = (player.PlayerResources.gem ?? 0) + productInfo.amount;
+    message = `Added +${productInfo.amount} gems`;
+    changed = true;
+  } else if (purchase.category === 'Guns') {
+    const gunKey = String(productInfo.gunId);
+    const gunsMap = ensurePlayerGunMap(player);
+    const hasGun = gunsMap instanceof Map ? gunsMap.get(gunKey) : gunsMap[gunKey];
+
+    if (hasGun) {
+      message = `Gun already owned: ${purchase.product} (id=${productInfo.gunId})`;
+      delivered = false;
+    } else {
+      const gunData = { id: productInfo.gunId, level: 1, ammo: 100000, isNew: true };
+      if (gunsMap instanceof Map) {
+        gunsMap.set(gunKey, gunData);
+      } else {
+        gunsMap[gunKey] = gunData;
+        player.PlayerGuns = gunsMap;
+        if (typeof player.markModified === 'function') player.markModified('PlayerGuns');
+      }
+      message = `Unlocked gun: ${purchase.product} (id=${productInfo.gunId})`;
+      changed = true;
+    }
+  }
+
+  if (changed) await player.save();
+
+  const finalMeta = { ...(purchase.metadata || {}) };
+  finalMeta.status = PURCHASE_STATUS.COMPLETED;
+  finalMeta.blockNumber = receipt.blockNumber ?? null;
+  finalMeta.transactionIndex = receipt.transactionIndex ?? null;
+  finalMeta.logIndex = purchaseLog.logIndex ?? null;
+  finalMeta.completedAt = new Date();
+  finalMeta.message = message;
+  delete finalMeta.verificationError;
+
+  purchase.metadata = finalMeta;
+  purchase.chainId = tx.chainId != null ? Number(tx.chainId) : undefined;
+  purchase.delivered = delivered;
+  await purchase.save();
+}
+
+function schedulePurchaseProcessing(purchaseId) {
+  const key = String(purchaseId);
+  if (processingPurchases.has(key)) return;
+  processingPurchases.add(key);
+  setImmediate(async () => {
+    try {
+      await verifyAndDeliverPurchase(purchaseId);
+    } catch (err) {
+      console.error('IAP background verification failed:', err);
+      try {
+        const purchase = await IAPPurchase.findById(purchaseId);
+        if (purchase) {
+          await markPurchaseFailed(
+            purchase,
+            err?.message || 'Background verification failed',
+          );
+        }
+      } catch (markErr) {
+        console.error('Failed to persist IAP verification error:', markErr);
+      }
+    } finally {
+      processingPurchases.delete(key);
+    }
+  });
+}
+
+function buildPlayerSnapshot(player, purchasePayload) {
+  return {
+    walletAddress: player.walletAddress,
+    PlayerResources: player.PlayerResources,
+    PlayerGuns: toPlainMap(player.PlayerGuns),
+    purchase: purchasePayload,
+    priceEth: purchasePayload?.priceEth,
+    price: purchasePayload?.price,
+    currency: 'ETH',
+  };
+}
 
 // POST /warzone/iap/purchase
 exports.purchase = async (req, res) => {
@@ -245,6 +450,9 @@ exports.purchase = async (req, res) => {
       ethers.utils.toUtf8Bytes(orderIdTrim),
     );
 
+    // Validate pack/product synchronously so client gets fast deterministic errors.
+    const productInfo = resolveProduct(categoryNorm, productNorm);
+
     const player = await PlayerProfile.findOne({
       walletAddress: { $regex: new RegExp(`^${wallet}$`, 'i') },
     });
@@ -252,228 +460,98 @@ exports.purchase = async (req, res) => {
       return res.status(404).json({ ok: false, message: 'Player not found' });
     }
 
-    const existingOrder = await IAPPurchase.findOne({ orderHash });
-    if (existingOrder) {
-      if (normalizeAddress(existingOrder.walletAddress) !== wallet) {
+    let purchaseRecord = await IAPPurchase.findOne({ orderHash });
+    if (purchaseRecord) {
+      if (normalizeAddress(purchaseRecord.walletAddress) !== wallet) {
         return res.status(409).json({
           ok: false,
           message: 'Order already processed by another wallet',
         });
       }
-      if (existingOrder.txHash !== txHashNorm) {
+      if (purchaseRecord.txHash !== txHashNorm) {
         return res.status(409).json({
           ok: false,
           message: 'Order already processed with a different transaction hash',
         });
       }
       if (
-        existingOrder.category !== categoryNorm ||
-        existingOrder.product !== productNorm
+        purchaseRecord.category !== categoryNorm ||
+        purchaseRecord.product !== productNorm
       ) {
         return res
           .status(409)
           .json({ ok: false, message: 'Order already processed for another item' });
       }
 
-      const purchasePayload = buildPurchasePayload(existingOrder);
+      const status = purchaseRecord.metadata?.status;
+      if (status !== PURCHASE_STATUS.COMPLETED && status !== PURCHASE_STATUS.FAILED) {
+        schedulePurchaseProcessing(purchaseRecord._id);
+      }
+
+      const purchasePayload = buildPurchasePayload(purchaseRecord);
       return res.json({
         ok: true,
-        message: 'Order already processed',
-        data: {
-          walletAddress: player.walletAddress,
-          PlayerResources: player.PlayerResources,
-          PlayerGuns: toPlainMap(player.PlayerGuns),
-          purchase: purchasePayload,
-          priceEth: purchasePayload?.priceEth,
-          price: purchasePayload?.price,
-          currency: 'ETH',
+        message:
+          purchasePayload?.status === PURCHASE_STATUS.COMPLETED
+            ? 'Order already processed'
+            : 'Purchase is being verified in background',
+        data: buildPlayerSnapshot(player, purchasePayload),
+      });
+    }
+
+    try {
+      purchaseRecord = await IAPPurchase.create({
+        orderId: orderIdTrim,
+        orderHash,
+        walletAddress: wallet,
+        txHash: txHashNorm,
+        category: categoryNorm,
+        product: productNorm,
+        priceEth: productInfo.priceEth,
+        price: productInfo.price,
+        priceWei: productInfo.priceWei.toString(),
+        delivered: false,
+        metadata: {
+          amount: productInfo.amount ?? null,
+          gunId: productInfo.gunId ?? null,
+          status: PURCHASE_STATUS.PENDING,
+          acceptedAt: new Date(),
         },
       });
-    }
-
-    const productInfo = resolveProduct(categoryNorm, productNorm);
-
-    const receipt = await provider.getTransactionReceipt(txHashNorm);
-    if (!receipt) {
-      return res.status(400).json({
-        ok: false,
-        message: 'Transaction receipt not found (transaction may still be pending)',
-      });
-    }
-    if (receipt.status !== 1) {
-      return res
-        .status(400)
-        .json({ ok: false, message: 'Transaction failed on-chain' });
-    }
-    if (normalizeAddress(receipt.to) !== CONTRACT_ADDRESS) {
-      return res.status(400).json({
-        ok: false,
-        message: 'Transaction was not sent to the purchase contract',
-      });
-    }
-    if (normalizeAddress(receipt.from) !== wallet) {
-      return res.status(400).json({
-        ok: false,
-        message: 'Transaction sender does not match the authenticated wallet',
-      });
-    }
-
-    const tx = await provider.getTransaction(txHashNorm);
-    if (!tx) {
-      return res.status(400).json({ ok: false, message: 'Transaction not found' });
-    }
-    if (tx.chainId != null && Number(tx.chainId) !== EXPECTED_CHAIN_ID) {
-      return res.status(400).json({
-        ok: false,
-        message: `Transaction was submitted on an unexpected chain (expected ${EXPECTED_CHAIN_ID})`,
-      });
-    }
-    if (!tx.value.eq(productInfo.priceWei)) {
-      return res.status(400).json({
-        ok: false,
-        message: 'Transaction value does not match product price',
-      });
-    }
-
-    const purchaseLog = receipt.logs.find(
-      (log) =>
-        normalizeAddress(log.address) === CONTRACT_ADDRESS &&
-        log.topics &&
-        log.topics[0] === PURCHASE_TOPIC,
-    );
-    if (!purchaseLog) {
-      return res
-        .status(400)
-        .json({ ok: false, message: 'Purchase event not found in transaction logs' });
-    }
-
-    const parsedLog = contractInterface.parseLog(purchaseLog);
-    if (normalizeAddress(parsedLog.args.buyer) !== wallet) {
-      return res.status(400).json({
-        ok: false,
-        message: 'Purchase event does not belong to the authenticated wallet',
-      });
-    }
-    if (parsedLog.args.orderId !== orderHash) {
-      return res
-        .status(400)
-        .json({ ok: false, message: 'Order id mismatch in purchase event' });
-    }
-    if (
-      parsedLog.args.category !== categoryNorm ||
-      parsedLog.args.product !== productNorm
-    ) {
-      return res.status(400).json({
-        ok: false,
-        message: 'Category or product mismatch in purchase event',
-      });
-    }
-    if (!parsedLog.args.priceWei.eq(productInfo.priceWei)) {
-      return res.status(400).json({
-        ok: false,
-        message: 'Purchase event price does not match configured price',
-      });
-    }
-
-    let message = '';
-    let changed = false;
-    let delivered = true;
-
-    if (categoryNorm === 'Coins') {
-      player.PlayerResources = player.PlayerResources || {
-        coin: 0,
-        gem: 0,
-        stamina: 0,
-        medal: 0,
-        tournamentTicket: 0,
-      };
-      const prev = player.PlayerResources.coin ?? 0;
-      player.PlayerResources.coin = prev + productInfo.amount;
-      message = `Added +${productInfo.amount} coins`;
-      changed = true;
-    } else if (categoryNorm === 'Gems') {
-      player.PlayerResources = player.PlayerResources || {
-        coin: 0,
-        gem: 0,
-        stamina: 0,
-        medal: 0,
-        tournamentTicket: 0,
-      };
-      const prev = player.PlayerResources.gem ?? 0;
-      player.PlayerResources.gem = prev + productInfo.amount;
-      message = `Added +${productInfo.amount} gems`;
-      changed = true;
-    } else if (categoryNorm === 'Guns') {
-      const gunId = productInfo.gunId;
-      const gunKey = String(gunId);
-      const gunsMap = ensurePlayerGunMap(player);
-
-      const hasGun =
-        gunsMap instanceof Map ? gunsMap.get(gunKey) : gunsMap[gunKey];
-
-      if (hasGun) {
-        message = `Gun already owned: ${productNorm} (id=${gunId})`;
-        delivered = false;
+    } catch (createErr) {
+      if (createErr?.code === 11000) {
+        purchaseRecord =
+          (await IAPPurchase.findOne({ orderHash })) ||
+          (await IAPPurchase.findOne({ txHash: txHashNorm }));
       } else {
-        const gunData = {
-          id: gunId,
-          level: 1,
-          ammo: 100000,
-          isNew: true,
-        };
-        if (gunsMap instanceof Map) {
-          gunsMap.set(gunKey, gunData);
-        } else {
-          gunsMap[gunKey] = gunData;
-          player.PlayerGuns = gunsMap;
-          if (typeof player.markModified === 'function') {
-            player.markModified('PlayerGuns');
-          }
-        }
-        message = `Unlocked gun: ${productNorm} (id=${gunId})`;
-        changed = true;
+        throw createErr;
       }
     }
-
-    if (changed) {
-      await player.save();
+    if (!purchaseRecord) {
+      throw new Error('Unable to create or resolve purchase record');
+    }
+    if (normalizeAddress(purchaseRecord.walletAddress) !== wallet) {
+      return res.status(409).json({
+        ok: false,
+        message: 'Order already processed by another wallet',
+      });
+    }
+    if (
+      purchaseRecord.category !== categoryNorm ||
+      purchaseRecord.product !== productNorm
+    ) {
+      return res
+        .status(409)
+        .json({ ok: false, message: 'Order already processed for another item' });
     }
 
-    const purchaseRecord = await IAPPurchase.create({
-      orderId: orderIdTrim,
-      orderHash,
-      walletAddress: wallet,
-      txHash: txHashNorm,
-      category: categoryNorm,
-      product: productNorm,
-      priceEth: productInfo.priceEth,
-      price: productInfo.price,
-      priceWei: productInfo.priceWei.toString(),
-      delivered,
-      chainId: tx.chainId != null ? Number(tx.chainId) : undefined,
-      metadata: {
-        amount: productInfo.amount ?? null,
-        gunId: productInfo.gunId ?? null,
-        blockNumber: receipt.blockNumber ?? null,
-        transactionIndex: receipt.transactionIndex ?? null,
-        logIndex: purchaseLog.logIndex ?? null,
-      },
-    });
+    schedulePurchaseProcessing(purchaseRecord._id);
 
     const purchasePayload = buildPurchasePayload(purchaseRecord);
-
-    return res.json({
+    return res.status(202).json({
       ok: true,
-      message,
-      data: {
-        walletAddress: player.walletAddress,
-        PlayerResources: player.PlayerResources,
-        PlayerGuns: toPlainMap(player.PlayerGuns),
-        purchase: purchasePayload,
-        priceEth: purchasePayload.priceEth,
-        price: purchasePayload.price,
-        currency: 'ETH',
-      },
+      message: 'Purchase accepted for background verification',
+      data: buildPlayerSnapshot(player, purchasePayload),
     });
   } catch (err) {
     console.error('IAP purchase error:', err);
@@ -482,5 +560,57 @@ exports.purchase = async (req, res) => {
       err?.message ||
       'Unable to process purchase at the moment. Please try again later.';
     return res.status(status).json({ ok: false, message });
+  }
+};
+
+// GET /warzone/iap/purchase-status?orderId=... OR ?txHash=...
+exports.getPurchaseStatus = async (req, res) => {
+  try {
+    const wallet = normalizeAddress(
+      req.walletAddress || req.user?.wallet || req.wallet || '',
+    );
+    if (!wallet) {
+      return res.status(401).json({ ok: false, message: 'Unauthorized' });
+    }
+
+    const orderId = String(req.query?.orderId || '').trim();
+    const txHash = String(req.query?.txHash || '').trim().toLowerCase();
+    if (!orderId && !txHash) {
+      return res.status(400).json({
+        ok: false,
+        message: 'orderId or txHash is required',
+      });
+    }
+
+    const query = orderId ? { orderId } : { txHash };
+    const purchase = await IAPPurchase.findOne(query);
+    if (!purchase) {
+      return res.status(404).json({ ok: false, message: 'Purchase not found' });
+    }
+    if (normalizeAddress(purchase.walletAddress) !== wallet) {
+      return res.status(403).json({ ok: false, message: 'Forbidden' });
+    }
+
+    const status = purchase.metadata?.status;
+    if (status !== PURCHASE_STATUS.COMPLETED && status !== PURCHASE_STATUS.FAILED) {
+      schedulePurchaseProcessing(purchase._id);
+    }
+
+    const player = await PlayerProfile.findOne({
+      walletAddress: { $regex: new RegExp(`^${wallet}$`, 'i') },
+    });
+    if (!player) {
+      return res.status(404).json({ ok: false, message: 'Player not found' });
+    }
+
+    const purchasePayload = buildPurchasePayload(purchase);
+    return res.json({
+      ok: true,
+      message: 'Purchase status fetched',
+      data: buildPlayerSnapshot(player, purchasePayload),
+    });
+  } catch (err) {
+    console.error('IAP purchase status error:', err);
+    return res.status(500).json({ ok: false, message: 'Unable to fetch purchase status' });
   }
 };
