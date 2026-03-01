@@ -92,6 +92,8 @@ function getChainConfig() {
   const gasPriceGwei = readEnv('GAS_PRICE_GWEI', '');
   const rpcTimeoutMs = Number(readEnv('SOMNIA_RPC_TIMEOUT_MS', '15000'));
   const rpcRetries = Number(readEnv('SOMNIA_RPC_RETRIES', '3'));
+  const nonceFloorTtlMs = Number(readEnv('SOMNIA_NONCE_FLOOR_TTL_MS', '2000'));
+  const nonceFloorStrategy = readEnv('SOMNIA_NONCE_FLOOR_STRATEGY', 'pending'); // 'pending' | 'pending_latest'
   const chainId = Number(readEnv('SOMNIA_CHAIN_ID', '5031'));
   const networkName = readEnv('SOMNIA_NETWORK_NAME', 'somnia');
   return {
@@ -103,6 +105,8 @@ function getChainConfig() {
     gasPriceGwei,
     rpcTimeoutMs,
     rpcRetries,
+    nonceFloorTtlMs,
+    nonceFloorStrategy,
     chainId,
     networkName,
   };
@@ -163,7 +167,9 @@ class RetryingJsonRpcProvider extends ethers.providers.StaticJsonRpcProvider {
   }
 
   async send(method, params) {
-    const maxAttempts = this._rpcRetries + 1;
+    // For raw tx broadcast, prefer fast failover over retrying the same host.
+    const retriesForMethod = method === 'eth_sendRawTransaction' ? 0 : this._rpcRetries;
+    const maxAttempts = retriesForMethod + 1;
     let lastErr;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
@@ -256,16 +262,36 @@ function useDbNonceManager() {
   return raw !== 'false' && raw !== '0';
 }
 
-async function getChainNonceFloor({ provider, address }) {
-  const [pending, latest] = await Promise.all([
-    provider.getTransactionCount(address, 'pending'),
-    provider.getTransactionCount(address, 'latest'),
-  ]);
+const _nonceFloorCache = new Map();
 
-  const floor = Math.max(Number(pending), Number(latest));
-  if (!Number.isSafeInteger(floor)) {
-    throw new Error(`Unsafe nonce value returned from RPC: pending=${pending} latest=${latest}`);
+function nonceFloorCacheKey({ chainId, address }) {
+  return `${chainId}:${String(address || '').trim().toLowerCase()}`;
+}
+
+function clearNonceFloorCache({ chainId, address }) {
+  _nonceFloorCache.delete(nonceFloorCacheKey({ chainId, address }));
+}
+
+async function getChainNonceFloor({ provider, address }) {
+  const { chainId, nonceFloorTtlMs, nonceFloorStrategy } = getChainConfig();
+  const key = nonceFloorCacheKey({ chainId, address });
+  const now = Date.now();
+  const cached = _nonceFloorCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.value;
+
+  // Most RPCs guarantee pending >= latest; calling both doubles load.
+  const pending = await provider.getTransactionCount(address, 'pending');
+  let floor = Number(pending);
+  if (nonceFloorStrategy === 'pending_latest') {
+    const latest = await provider.getTransactionCount(address, 'latest');
+    floor = Math.max(floor, Number(latest));
   }
+  if (!Number.isSafeInteger(floor)) {
+    throw new Error(`Unsafe nonce value returned from RPC: pending=${pending}`);
+  }
+
+  const ttl = Number.isFinite(nonceFloorTtlMs) ? Math.max(0, nonceFloorTtlMs) : 0;
+  _nonceFloorCache.set(key, { value: floor, expiresAt: now + ttl });
   return floor;
 }
 
@@ -297,6 +323,7 @@ async function sendContractTx(method, args = [], overrides = {}) {
       } catch (err) {
         if (isNonceConflictError(err) && attempt < 3) {
           try {
+            clearNonceFloorCache({ chainId, address: from });
             const chainNonceFloor = await getChainNonceFloor({ provider, address: from });
             if (dbNonce) {
               await NonceState.bumpFloor({ address: from, chainId, chainNonceFloor });
