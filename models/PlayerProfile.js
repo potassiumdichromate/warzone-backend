@@ -365,6 +365,8 @@ PlayerCampaignStageProgress: {
   toObject: { getters: true }
 });
 
+// Supports leaderboard queries sorting by coin balance.
+PlayerProfileSchema.index({ 'PlayerResources.coin': -1 });
+
 module.exports = mongoose.models.WarzonePlayerProfile
   || mongoose.model('WarzonePlayerProfile', PlayerProfileSchema);
-

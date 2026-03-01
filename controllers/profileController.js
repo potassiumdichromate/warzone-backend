@@ -14,6 +14,10 @@ const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 const PERF_LOGS_ENABLED =
   String(process.env.API_PERF_LOGS ?? 'true').trim().toLowerCase() !== 'false';
 const PERF_SLOW_STEP_MS = Number(process.env.API_SLOW_STEP_MS || 500);
+const ASYNC_CHAIN_ON_LOGIN =
+  String(process.env.ASYNC_CHAIN_ON_LOGIN ?? 'true').trim().toLowerCase() !== 'false';
+const ASYNC_CHAIN_ON_SAVE_PROFILE =
+  String(process.env.ASYNC_CHAIN_ON_SAVE_PROFILE ?? 'true').trim().toLowerCase() !== 'false';
 
 function createPerfLogger(scope, meta = {}) {
   const start = process.hrtime.bigint();
@@ -44,6 +48,20 @@ function createPerfLogger(scope, meta = {}) {
       emit(totalMs >= PERF_SLOW_STEP_MS ? 'warn' : 'info', 'total', totalMs, extra);
     },
   };
+}
+
+function runInBackground(task, label, meta = {}) {
+  setImmediate(async () => {
+    const perf = createPerfLogger(label, meta);
+    try {
+      await task();
+      perf.done({ status: 'ok' });
+    } catch (error) {
+      perf.step('error', { message: error?.message || String(error) });
+      perf.done({ status: 'error' });
+      console.error(`[${label}] background task failed:`, error);
+    }
+  });
 }
 
 const SUPPORTED_WALLET_PROVIDER_TYPES = new Set([
@@ -621,8 +639,22 @@ exports.saveProfile = async (req, res) => {
     await profile.save();
     perf.step('profile_save');
 
-    const chainEnd = await endGameIfActive(walletAddress);
-    perf.step('endGameIfActive');
+    let chainEnd = {
+      attemptedEnd: false,
+      endTxHash: null,
+      notes: ['endGameIfActive scheduled asynchronously'],
+    };
+    if (ASYNC_CHAIN_ON_SAVE_PROFILE) {
+      runInBackground(
+        () => endGameIfActive(walletAddress),
+        'saveProfile.endGameIfActive',
+        { walletAddress },
+      );
+      perf.step('endGameIfActive_scheduled_async');
+    } else {
+      chainEnd = await endGameIfActive(walletAddress);
+      perf.step('endGameIfActive');
+    }
 
     const fresh = await getWalletProfile(walletAddress);
     perf.step('getWalletProfile_refresh');
@@ -882,11 +914,27 @@ exports.login = async (req, res) => {
       perf.step('update_profile');
     }
 
-    const chainResult = await registerAndStartOnChain(walletAddress, '');
-    perf.step('registerAndStartOnChain', {
-      attemptedRegister: chainResult?.attemptedRegister,
-      attemptedStart: chainResult?.attemptedStart,
-    });
+    let chainResult = {
+      attemptedRegister: false,
+      registerTxHash: null,
+      attemptedStart: false,
+      startTxHash: null,
+      notes: ['registerAndStartOnChain scheduled asynchronously'],
+    };
+    if (ASYNC_CHAIN_ON_LOGIN) {
+      runInBackground(
+        () => registerAndStartOnChain(walletAddress, ''),
+        'login.registerAndStartOnChain',
+        { walletAddress: normalizedWalletAddress },
+      );
+      perf.step('registerAndStartOnChain_scheduled_async');
+    } else {
+      chainResult = await registerAndStartOnChain(walletAddress, '');
+      perf.step('registerAndStartOnChain', {
+        attemptedRegister: chainResult?.attemptedRegister,
+        attemptedStart: chainResult?.attemptedStart,
+      });
+    }
 
     const token = jwt.sign({ walletAddress }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
     perf.step('jwt_sign');
