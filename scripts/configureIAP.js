@@ -14,13 +14,31 @@
  */
 
 const path = require('path');
+const fs = require('fs');
 const { ethers } = require('ethers');
 const dotenv = require('dotenv');
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-const contractAbi = require(path.join(__dirname, '../..', 'shared/abi/WarzoneInAppPurchase.json'));
+function loadContractAbi() {
+  const candidates = [
+    path.resolve(__dirname, '../shared/WarzoneInAppPurchase.json'),
+    path.resolve(__dirname, '../shared/abi/WarzoneInAppPurchase.json'),
+    path.resolve(__dirname, '../../shared/WarzoneInAppPurchase.json'),
+    path.resolve(__dirname, '../../shared/abi/WarzoneInAppPurchase.json'),
+  ];
+
+  const abiPath = candidates.find((p) => fs.existsSync(p));
+  if (!abiPath) {
+    throw new Error(
+      `WarzoneInAppPurchase ABI not found. Tried: ${candidates.join(', ')}`,
+    );
+  }
+  return require(abiPath);
+}
+
+const contractAbi = loadContractAbi();
 
 const DEFAULT_RPC = 'https://api.infra.mainnet.somnia.network';
 const PRODUCTS = [
