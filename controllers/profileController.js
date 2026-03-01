@@ -11,6 +11,40 @@ const { request } = require('http');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+const PERF_LOGS_ENABLED =
+  String(process.env.API_PERF_LOGS ?? 'true').trim().toLowerCase() !== 'false';
+const PERF_SLOW_STEP_MS = Number(process.env.API_SLOW_STEP_MS || 500);
+
+function createPerfLogger(scope, meta = {}) {
+  const start = process.hrtime.bigint();
+  let last = start;
+
+  const emit = (level, phase, durationMs, extra = {}) => {
+    if (!PERF_LOGS_ENABLED) return;
+    const payload = {
+      scope,
+      phase,
+      durationMs: Number(durationMs.toFixed(2)),
+      ...meta,
+      ...extra,
+    };
+    if (level === 'warn') console.warn('[perf][slow]', payload);
+    else console.log('[perf]', payload);
+  };
+
+  return {
+    step(phase, extra = {}) {
+      const now = process.hrtime.bigint();
+      const durationMs = Number(now - last) / 1e6;
+      last = now;
+      emit(durationMs >= PERF_SLOW_STEP_MS ? 'warn' : 'info', phase, durationMs, extra);
+    },
+    done(extra = {}) {
+      const totalMs = Number(process.hrtime.bigint() - start) / 1e6;
+      emit(totalMs >= PERF_SLOW_STEP_MS ? 'warn' : 'info', 'total', totalMs, extra);
+    },
+  };
+}
 
 const SUPPORTED_WALLET_PROVIDER_TYPES = new Set([
   'metamask',
@@ -374,6 +408,7 @@ function extractAchievementValues(achievementData) {
 }
 
 async function registerAndStartOnChain(walletAddress, displayName = '') {
+  const perf = createPerfLogger('registerAndStartOnChain', { walletAddress });
   const overrides = gasOverrides();
 
   const result = {
@@ -385,19 +420,24 @@ async function registerAndStartOnChain(walletAddress, displayName = '') {
   };
   try {
     const contract = getGameContract();
+    perf.step('getGameContract');
     let registered = false;
     try {
       registered = await contract.isRegistered(walletAddress);
+      perf.step('isRegistered', { registered });
     } catch {
       result.notes.push('isRegistered check failed — continuing.');
+      perf.step('isRegistered_failed');
     }
 
     if (!registered) {
       result.attemptedRegister = true;
       const tx = await sendContractTx('registerUser', [walletAddress, displayName], overrides);
       result.registerTxHash = tx.hash;
+      perf.step('registerUser_sent', { txHash: tx.hash });
       const { waitConfirmations } = getChainConfig();
       if (waitConfirmations >= 0) await tx.wait(waitConfirmations);
+      perf.step('registerUser_confirmed', { waitConfirmations });
     } else {
       result.notes.push('Already registered on-chain.');
     }
@@ -405,29 +445,36 @@ async function registerAndStartOnChain(walletAddress, displayName = '') {
     let activeId = 0;
     try {
       activeId = Number(await contract.activeSessionOf(walletAddress) || 0);
+      perf.step('activeSessionOf', { activeId });
     } catch {
       result.notes.push('activeSessionOf check failed — attempting start anyway.');
+      perf.step('activeSessionOf_failed');
     }
 
     if (!activeId) {
       result.attemptedStart = true;
       const tx2 = await sendContractTx('startGameFor', [walletAddress], overrides);
       result.startTxHash = tx2.hash;
+      perf.step('startGameFor_sent', { txHash: tx2.hash });
       const { waitConfirmations: wait2 } = getChainConfig();
       if (wait2 >= 0) await tx2.wait(wait2);
+      perf.step('startGameFor_confirmed', { waitConfirmations: wait2 });
     } else {
       result.notes.push(`Game already active (sessionId=${activeId}).`);
     }
   } catch (err) {
     console.error('On-chain error:', err);
     result.notes.push(`On-chain error: ${err.message || String(err)}`);
+    perf.step('onchain_error', { message: err?.message });
   }
 
   console.log('registerAndStartOnChain result:', result);
+  perf.done({ attemptedRegister: result.attemptedRegister, attemptedStart: result.attemptedStart });
   return result;
 }
 
 async function endGameIfActive(walletAddress) {
+  const perf = createPerfLogger('endGameIfActive', { walletAddress });
   const overrides = gasOverrides();
 
   const result = {
@@ -438,11 +485,14 @@ async function endGameIfActive(walletAddress) {
 
   try {
     const contract = getGameContract();
+    perf.step('getGameContract');
     let activeId = 0;
     try {
       activeId = Number(await contract.activeSessionOf(walletAddress) || 0);
+      perf.step('activeSessionOf', { activeId });
     } catch {
       result.notes.push('activeSessionOf check failed — attempting end anyway.');
+      perf.step('activeSessionOf_failed');
     }
 
     if (!activeId) {
@@ -453,13 +503,17 @@ async function endGameIfActive(walletAddress) {
     result.attemptedEnd = true;
     const tx = await sendContractTx('endGameFor', [walletAddress], overrides);
     result.endTxHash = tx.hash;
+    perf.step('endGameFor_sent', { txHash: tx.hash });
     const { waitConfirmations } = getChainConfig();
     if (waitConfirmations >= 0) await tx.wait(waitConfirmations);
+    perf.step('endGameFor_confirmed', { waitConfirmations });
   } catch (err) {
     console.error('endGameIfActive error:', err);
     result.notes.push(`On-chain error: ${err.message || String(err)}`);
+    perf.step('onchain_error', { message: err?.message });
   }
 
+  perf.done({ attemptedEnd: result.attemptedEnd });
   return result;
 }
 
@@ -512,26 +566,32 @@ function normalizeProfile(obj) {
 }
 
 const getWalletProfile = async (walletAddress) => {
+  const perf = createPerfLogger('getWalletProfile', { walletAddress });
   const normalizedWalletAddress = normalizeWalletAddress(walletAddress);
   if (!normalizedWalletAddress) throw new Error('walletAddress required');
 
   let profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
+  perf.step('findOne');
 
   if (!profile) {
     profile = new PlayerProfile({ walletAddress, ...defaultData });
     normalizeProfile(profile);
     await profile.save();
+    perf.step('create_and_save');
   } else {
     if (profile.PlayerCampaignProgress == null) profile.PlayerCampaignProgress = {};
     if (profile.PlayerCampaignStageProgress == null) profile.PlayerCampaignStageProgress = {};
     normalizeProfile(profile);
     await profile.save();
+    perf.step('normalize_and_save');
   }
+  perf.done();
   return profile;
 };
 
 /* ---------------- controllers ---------------- */
 exports.saveProfile = async (req, res) => {
+  const perf = createPerfLogger('saveProfile', { walletAddress: req.body?.walletAddress });
   try {
     const { data: shouldUpdate, walletAddress, ...data } = req.body;
 
@@ -539,11 +599,14 @@ exports.saveProfile = async (req, res) => {
 
     if (shouldUpdate) {
       const profile = await getWalletProfile(walletAddress);
+      perf.step('getWalletProfile_only');
+      perf.done({ shouldUpdate: true });
       return res.json(profile);
     }
 
     const normalizedWalletAddress = normalizeWalletAddress(walletAddress);
     let profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
+    perf.step('findOne');
     if (!profile) profile = new PlayerProfile({ walletAddress, ...defaultData });
 
     data.PlayerCampaignProgress = {};
@@ -556,10 +619,14 @@ exports.saveProfile = async (req, res) => {
     normalizeProfile(profile);
 
     await profile.save();
+    perf.step('profile_save');
 
     const chainEnd = await endGameIfActive(walletAddress);
+    perf.step('endGameIfActive');
 
     const fresh = await getWalletProfile(walletAddress);
+    perf.step('getWalletProfile_refresh');
+    perf.done({ shouldUpdate: false });
     return res.json({ ...fresh, chain: chainEnd });
   } catch (error) {
     console.error('Error in saveProfile:', error);
@@ -571,6 +638,7 @@ exports.saveProfile = async (req, res) => {
 };
 
 exports.getDailyQuests = async (req, res) => {
+  const perf = createPerfLogger('getDailyQuests', { walletAddress: req.query?.walletAddress });
   try {
     const { walletAddress } = req.query;
     if (!walletAddress) {
@@ -578,10 +646,12 @@ exports.getDailyQuests = async (req, res) => {
     }
 
     const profile = await getWalletProfile(walletAddress);
+    perf.step('getWalletProfile');
     if (!profile) {
       return res.status(404).json({ success: false, error: "Profile not found" });
     }
 
+    perf.done();
     return res.json({
       wallet: walletAddress,
       PlayerDailyQuestData: profile.PlayerDailyQuestData || []
@@ -593,11 +663,14 @@ exports.getDailyQuests = async (req, res) => {
 };
 
 exports.getProfile = async (req, res) => {
+  const perf = createPerfLogger('getProfile', { walletAddress: req.query?.walletAddress });
   try {
     const walletAddress = req.query.walletAddress;
     if (!walletAddress) return res.status(400).json({ error: 'walletAddress is required' });
 
     const profile = await getWalletProfile(walletAddress);
+    perf.step('getWalletProfile');
+    perf.done();
     return res.json(profile);
   } catch (error) {
     console.error('Error in getProfile:', error);
@@ -679,13 +752,16 @@ exports.getDailyQuestByType = async (req, res) => {
 };
 
 exports.getLeaderboard = async (req, res) => {
+  const perf = createPerfLogger('getLeaderboard');
   try {
     const leaderboard = await PlayerProfile.find()
       .sort({ 'PlayerResources.coin': -1 })
       .limit(100);
+    perf.step('find_profiles');
 
     const walletAddresses = leaderboard.map(p => p.walletAddress);
     const nameRecords = await WarzoneNameWallet.find({ walletAddress: { $in: walletAddresses } });
+    perf.step('find_names', { walletCount: walletAddresses.length });
     const nameMap = {};
     nameRecords.forEach(r => { nameMap[r.walletAddress] = r.name; });
 
@@ -698,6 +774,8 @@ exports.getLeaderboard = async (req, res) => {
       };
     });
 
+    perf.step('map_response');
+    perf.done({ count: leaderboardWithNames.length });
     res.json(leaderboardWithNames);
   } catch (error) {
     console.error('Error in getLeaderboard:', error);
@@ -763,6 +841,7 @@ exports.getName = async (req, res) => {
 };
 
 exports.login = async (req, res) => {
+  const perf = createPerfLogger('login');
   try {
     const walletAddress = extractLoginWalletAddress(req.body);
     const providerType = normalizeWalletProviderType(
@@ -779,7 +858,9 @@ exports.login = async (req, res) => {
     }
 
     const normalizedWalletAddress = normalizeWalletAddress(walletAddress);
+    perf.step('input_validated', { walletAddress: normalizedWalletAddress });
     let profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
+    perf.step('find_profile');
     const isNewUser = !profile;
 
     if (isNewUser) {
@@ -790,6 +871,7 @@ exports.login = async (req, res) => {
       profile.privyUserId = privyUserId;
       profile.lastLoginAt = new Date();
       await profile.save();
+      perf.step('create_profile');
     } else {
       normalizeProfile(profile);
       profile.walletProviderType = providerType || profile.walletProviderType || null;
@@ -797,11 +879,17 @@ exports.login = async (req, res) => {
       profile.privyUserId = privyUserId || profile.privyUserId || null;
       profile.lastLoginAt = new Date();
       await profile.save();
+      perf.step('update_profile');
     }
 
     const chainResult = await registerAndStartOnChain(walletAddress, '');
+    perf.step('registerAndStartOnChain', {
+      attemptedRegister: chainResult?.attemptedRegister,
+      attemptedStart: chainResult?.attemptedStart,
+    });
 
     const token = jwt.sign({ walletAddress }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+    perf.step('jwt_sign');
 
     res.cookie('token', token, {
       httpOnly: true,
@@ -811,6 +899,7 @@ exports.login = async (req, res) => {
       ...(process.env.NODE_ENV === 'production' ? { domain: '.warzonewarriors.xyz' } : {})
     });
 
+    perf.done({ isNewUser });
     res.status(isNewUser ? 201 : 200).json({
       success: true,
       message: isNewUser ? 'User registered successfully' : 'Login successful',
@@ -832,13 +921,14 @@ exports.login = async (req, res) => {
 // GET /achieveQuests/type/:type?walletAddress=0x...
 exports.getAchieveQuestByType = async (req, res) => {
   const requestId = crypto.randomBytes(16).toString('hex');
+  console.log("get achieveeQuestBy Type get called");
   try {
     const { walletAddress } = req.query;
     const type = Number(req.params.type);
     const clientIp = getClientIp(req);
 
     res.set('X-Request-Id', requestId);
-    console.log('[getAchieveQuestByType] start', { requestId, walletAddress, type, ip: clientIp, reqIp: req?.ip });
+    // console.log('[getAchieveQuestByType] start', { requestId, walletAddress, type, ip: clientIp, reqIp: req?.ip });
 
     if (!walletAddress) {
       console.warn('[getAchieveQuestByType] missing walletAddress', { requestId, ip: clientIp, reqIp: req.ip });
@@ -858,7 +948,7 @@ exports.getAchieveQuestByType = async (req, res) => {
 
     const matches = all.filter(q => q && Number(q.type) === type);
 
-    console.log('[getAchieveQuestByType] all count:', all.length, '| matches:', JSON.stringify(matches));
+    // console.log('[getAchieveQuestByType] all count:', all.length, '| matches:', JSON.stringify(matches));
 
     let completed = false;
     let reward = '';
@@ -887,10 +977,10 @@ exports.getAchieveQuestByType = async (req, res) => {
       reward: reward,
     };
 
-    console.log('[getAchieveQuestByType] success', { requestId, walletAddress, type, completed: newResponse.completed, score: newResponse.score });
+    // console.log('[getAchieveQuestByType] success', { requestId, walletAddress, type, completed: newResponse.completed, score: newResponse.score });
     return res.json({ ...newResponse });
   } catch (error) {
-    console.error("[getAchieveQuestByType] error", { requestId, message: error?.message, stack: error?.stack });
+    // console.error("[getAchieveQuestByType] error", { requestId, message: error?.message, stack: error?.stack });
     res.set('X-Request-Id', requestId);
     return res.status(500).json({
       ok: false,

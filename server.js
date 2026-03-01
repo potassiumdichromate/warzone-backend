@@ -6,6 +6,10 @@ const dotenv = require('dotenv');
 dotenv.config();
 const profileRoutes = require('./routes/profileRoutes');
 const app = express();
+const SLOW_REQUEST_MS = Number(process.env.SLOW_REQUEST_MS || 2000);
+const SLOW_MONGO_MS = Number(process.env.SLOW_MONGO_MS || 200);
+const ENABLE_MONGOOSE_DEBUG =
+  String(process.env.MONGOOSE_DEBUG_LOGS || '').trim().toLowerCase() === 'true';
 
 // Trust reverse proxy headers so req.ip resolves the real client IP.
 // Default is 1 hop (common with Nginx/Cloudflare -> Node).
@@ -66,11 +70,24 @@ app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Add request logging for debugging
+// Request latency logging to identify slow APIs
 app.use((req, res, next) => {
-  // console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-  // console.log('Origin:', req.get('Origin'));
-  // console.log('User-Agent:', req.get('User-Agent'));
+  const startedAt = process.hrtime.bigint();
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    const payload = {
+      method: req.method,
+      path: req.originalUrl || req.url,
+      status: res.statusCode,
+      durationMs: Number(durationMs.toFixed(2)),
+      ip: req.ip,
+    };
+    if (durationMs >= SLOW_REQUEST_MS) {
+      console.warn('[http][slow]', payload);
+    } else {
+      console.log('[http]', payload);
+    }
+  });
   next();
 });
 
@@ -101,9 +118,55 @@ app.use('*', (req, res) => {
 mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
-  dbName: process.env.MONGO_DB_NAME || 'new-warzone'
+  dbName: process.env.MONGO_DB_NAME || 'new-warzone',
+  monitorCommands: ENABLE_MONGOOSE_DEBUG,
 }).then(() => {
   console.log('MongoDB connected successfully');
+
+  // Optional DB command logging with real durations.
+  if (ENABLE_MONGOOSE_DEBUG) {
+    const commandStartTimes = new Map();
+    const client = mongoose.connection.getClient();
+
+    client.on('commandStarted', (event) => {
+      commandStartTimes.set(event.requestId, process.hrtime.bigint());
+    });
+
+    client.on('commandSucceeded', (event) => {
+      const startedAt = commandStartTimes.get(event.requestId);
+      commandStartTimes.delete(event.requestId);
+      if (!startedAt) return;
+
+      const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+      const payload = {
+        commandName: event.commandName,
+        database: event.databaseName,
+        durationMs: Number(durationMs.toFixed(2)),
+      };
+
+      if (durationMs >= SLOW_MONGO_MS) {
+        console.warn('[mongo][slow]', payload);
+      } else {
+        console.log('[mongo]', payload);
+      }
+    });
+
+    client.on('commandFailed', (event) => {
+      const startedAt = commandStartTimes.get(event.requestId);
+      commandStartTimes.delete(event.requestId);
+      const durationMs = startedAt
+        ? Number(process.hrtime.bigint() - startedAt) / 1e6
+        : undefined;
+      console.error('[mongo][failed]', {
+        commandName: event.commandName,
+        database: event.databaseName,
+        durationMs: durationMs != null ? Number(durationMs.toFixed(2)) : null,
+        failure: event.failure,
+      });
+    });
+
+    console.log('Mongo command timing logs enabled (MONGOOSE_DEBUG_LOGS=true)');
+  }
 }).catch(err => {
   console.error('MongoDB connection error:', err);
   process.exit(1);

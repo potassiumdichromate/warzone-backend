@@ -16,8 +16,46 @@ const EVENT_DB_NAME =
 let newDbConn;
 let AltProfile;
 let AltNameWallet;
+const PERF_SLOW_STEP_MS = Number(process.env.API_SLOW_STEP_MS || 500);
+const PERF_LOGS_ENABLED =
+  String(process.env.API_PERF_LOGS ?? 'true').trim().toLowerCase() !== 'false';
+
+function createPerfLogger(scope, meta = {}) {
+  const start = process.hrtime.bigint();
+  let last = start;
+
+  const log = (phase, durationMs, extra = {}) => {
+    if (!PERF_LOGS_ENABLED) return;
+    const payload = {
+      scope,
+      phase,
+      durationMs: Number(durationMs.toFixed(2)),
+      ...meta,
+      ...extra,
+    };
+    if (durationMs >= PERF_SLOW_STEP_MS) {
+      console.warn('[perf][slow]', payload);
+    } else {
+      console.log('[perf]', payload);
+    }
+  };
+
+  return {
+    step(phase, extra = {}) {
+      const now = process.hrtime.bigint();
+      const durationMs = Number(now - last) / 1e6;
+      last = now;
+      log(phase, durationMs, extra);
+    },
+    done(extra = {}) {
+      const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
+      log('total', durationMs, extra);
+    },
+  };
+}
 
 async function getAltModels() {
+  const perf = createPerfLogger('getAltModels');
   if (AltProfile && AltNameWallet) return { AltProfile, AltNameWallet };
 
   if (!newDbConn) {
@@ -33,28 +71,35 @@ async function getAltModels() {
     newDbConn.on('connected', () => console.log('[newDB] connected'));
     newDbConn.on('error', (err) => console.error('[newDB] connection error:', err));
     await newDbConn.asPromise();
+    perf.step('connect_alt_db');
   }
 
   // Reuse existing schemas on this separate connection
   AltProfile = newDbConn.model('WarzonePlayerProfile', PlayerProfile.schema);
   AltNameWallet = newDbConn.model('WarzoneNameWallet', WarzoneNameWallet.schema);
+  perf.step('init_models');
+  perf.done();
 
   return { AltProfile, AltNameWallet };
 }
 
 // GET all entries from the specific DB (no limit)
 exports.getSpecificDBLeaderboard = async (req, res) => {
+  const perf = createPerfLogger('getSpecificDBLeaderboard');
   try {
     const { AltProfile, AltNameWallet } = await getAltModels();
+    perf.step('getAltModels');
 
     const docs = await AltProfile
       .find()
       .sort({ 'PlayerResources.coin': -1 })
       .limit(100); // top 100 entries
+    perf.step('find_profiles');
     const walletAddresses = docs.map(d => d.walletAddress);
 
     // Optional: attach names if present in the same DB
     const nameDocs = await AltNameWallet.find({ walletAddress: { $in: walletAddresses } });
+    perf.step('find_names', { walletCount: walletAddresses.length });
     const nameMap = Object.fromEntries(nameDocs.map(n => [n.walletAddress, n.name]));
 
     const data = docs.map(d => {
@@ -65,6 +110,8 @@ exports.getSpecificDBLeaderboard = async (req, res) => {
       };
     });
 
+    perf.step('map_response');
+    perf.done({ count: data.length });
     res.json({ success: true, count: data.length, data });
   } catch (err) {
     console.error('getSpecificDBLeaderboard error:', err);
@@ -74,14 +121,20 @@ exports.getSpecificDBLeaderboard = async (req, res) => {
 
 // Optional: merged result across current default DB + the specific DB
 exports.getMergedLeaderboard = async (req, res) => {
+  const perf = createPerfLogger('getMergedLeaderboard');
   try {
     const { AltProfile } = await getAltModels();
+    perf.step('getAltModels');
     const [currentDocs, altDocs] = await Promise.all([
       // Default connection model (current DB)
       PlayerProfile.find(),
       // Alt connection model (specific DB)
       AltProfile.find(),
     ]);
+    perf.step('find_current_and_alt', {
+      currentCount: currentDocs.length,
+      altCount: altDocs.length,
+    });
 
     // Merge by walletAddress (last in wins)
     const byWallet = new Map();
@@ -91,6 +144,8 @@ exports.getMergedLeaderboard = async (req, res) => {
     }
 
     const data = Array.from(byWallet.values());
+    perf.step('merge_maps');
+    perf.done({ count: data.length });
     res.json({ success: true, count: data.length, data });
   } catch (err) {
     console.error('getMergedLeaderboard error:', err);
