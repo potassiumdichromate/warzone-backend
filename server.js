@@ -33,6 +33,7 @@ const allowedOrigins = [
   'http://localhost:3001',
   'https://warzonewarrior.vercel.app/',
   'https://warzonewarrior.vercel.app',
+  'https://warzone-admin.vercel.app/',
   'https://pub-2c48e58780b648b7a2a77316f7b0aa2c.r2.dev'
 ];
 
