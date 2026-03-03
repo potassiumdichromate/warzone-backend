@@ -142,6 +142,7 @@ function getChainConfig() {
   const rpcRetries = Number(readEnv('SOMNIA_RPC_RETRIES', '3'));
   const nonceFloorTtlMs = Number(readEnv('SOMNIA_NONCE_FLOOR_TTL_MS', '2000'));
   const nonceFloorStrategy = readEnv('SOMNIA_NONCE_FLOOR_STRATEGY', 'pending'); // 'pending' | 'pending_latest'
+  const maxNonceGap = 5;
   const chainId = Number(readEnv('SOMNIA_CHAIN_ID', '5031'));
   const networkName = readEnv('SOMNIA_NETWORK_NAME', 'somnia');
   return {
@@ -155,6 +156,7 @@ function getChainConfig() {
     rpcRetries,
     nonceFloorTtlMs,
     nonceFloorStrategy,
+    maxNonceGap,
     chainId,
     networkName,
   };
@@ -300,6 +302,8 @@ function isNonceConflictError(err) {
     err?.code === 'NONCE_EXPIRED' ||
     text.includes('nonce too low') ||
     text.includes('nonce has already been used') ||
+    text.includes('nonce not close enough') ||
+    text.includes('nonce too high') ||
     text.includes('already known') ||
     text.includes('replacement transaction underpriced')
   );
@@ -348,7 +352,7 @@ async function sendContractTx(method, args = [], overrides = {}) {
   const signer = contract.signer;
   const provider = contract.provider || signer.provider;
   const from = (await signer.getAddress()).toLowerCase();
-  const { chainId } = getChainConfig();
+  const { chainId, maxNonceGap } = getChainConfig();
   const dbNonce = useDbNonceManager();
 
   return withNonceLock(async () => {
@@ -358,7 +362,7 @@ async function sendContractTx(method, args = [], overrides = {}) {
 
         let nonce;
         if (dbNonce) {
-          nonce = await NonceState.allocateNonce({ address: from, chainId, chainNonceFloor });
+          nonce = await NonceState.allocateNonce({ address: from, chainId, chainNonceFloor, maxNonceGap });
         } else {
           if (_nextNonce == null) _nextNonce = chainNonceFloor;
           if (_nextNonce < chainNonceFloor) _nextNonce = chainNonceFloor;
