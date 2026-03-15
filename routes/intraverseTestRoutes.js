@@ -1,9 +1,10 @@
 const express = require('express');
-const router = express.Router();
 const https = require('https');
 
-const BASE_URL = 'https://api-stage.intraverse.io';
-const GAME_SLUG = 'kult-games';
+const router = express.Router();
+
+const BASE_URL = process.env.INTRAVERSE_BASE_URL || 'https://api.intraverse.io';
+const DEFAULT_GAME_SLUG = process.env.INTRAVERSE_GAME_SLUG || 'kult-games';
 
 function fetchJSON(url, options = {}) {
   return new Promise((resolve, reject) => {
@@ -20,7 +21,9 @@ function fetchJSON(url, options = {}) {
 
     const req = https.request(reqOptions, (res) => {
       let data = '';
-      res.on('data', (chunk) => { data += chunk; });
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
       res.on('end', () => {
         try {
           resolve({ status: res.statusCode, body: JSON.parse(data) });
@@ -35,66 +38,135 @@ function fetchJSON(url, options = {}) {
     if (options.body) {
       req.write(JSON.stringify(options.body));
     }
+
     req.end();
   });
 }
 
-// Master test route — hits ALL Intraverse APIs and returns results
+function maskKey(key) {
+  return key ? `${key.slice(0, 8)}...` : 'MISSING';
+}
+
+function buildQueryString(source, allowedKeys) {
+  const params = new URLSearchParams();
+
+  allowedKeys.forEach((key) => {
+    const value = source[key];
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      params.set(key, String(value));
+    }
+  });
+
+  const query = params.toString();
+  return query ? `?${query}` : '';
+}
+
+function getUserJwt(req) {
+  const authHeader = String(req.headers.authorization || '').trim();
+  if (authHeader.toLowerCase().startsWith('bearer ')) {
+    return authHeader.slice(7).trim();
+  }
+
+  const forwardedJwt = String(req.headers['x-user-jwt'] || '').trim();
+  if (forwardedJwt.toLowerCase().startsWith('bearer ')) {
+    return forwardedJwt.slice(7).trim();
+  }
+
+  return forwardedJwt;
+}
+
+function buildAuthHeaders(req, { includeClientKey = false, includeServerKey = false, includeUserJwt = false } = {}) {
+  const headers = {};
+
+  if (includeClientKey && process.env.INTRAVERSE_CLIENT_KEY) {
+    headers['x-game-key'] = process.env.INTRAVERSE_CLIENT_KEY;
+  }
+
+  if (includeServerKey && process.env.INTRAVERSE_SERVER_KEY) {
+    headers['x-game-server-key'] = process.env.INTRAVERSE_SERVER_KEY;
+  }
+
+  if (includeUserJwt) {
+    const userJwt = getUserJwt(req);
+    if (userJwt) {
+      headers.Authorization = `Bearer ${userJwt}`;
+    }
+  }
+
+  return headers;
+}
+
+async function proxyToIntraverse(req, res, path, options = {}) {
+  try {
+    const headers = {
+      ...buildAuthHeaders(req, options.auth),
+      ...(options.headers || {}),
+    };
+
+    const response = await fetchJSON(`${BASE_URL}${path}`, {
+      method: options.method || 'GET',
+      headers,
+      body: options.body,
+    });
+
+    console.log(`[intraverse] ${options.method || 'GET'} ${path}`, response.status, JSON.stringify(response.body, null, 2));
+    res.status(response.status).json({ status: response.status, body: response.body });
+  } catch (error) {
+    console.error(`[intraverse] ${options.method || 'GET'} ${path} failed`, error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
+router.get('/meta', (req, res) => {
+  res.json({
+    baseUrl: BASE_URL,
+    defaultGameSlug: DEFAULT_GAME_SLUG,
+    keysLoaded: {
+      serverKey: maskKey(process.env.INTRAVERSE_SERVER_KEY),
+      clientKey: maskKey(process.env.INTRAVERSE_CLIENT_KEY),
+    },
+    frontendNeeds: {
+      userJwtForProtectedEndpoints: true,
+      gameKeysInFrontend: false,
+    },
+  });
+});
+
 router.get('/', async (req, res) => {
-  const SERVER_KEY = process.env.INTRAVERSE_SERVER_KEY;
-  const CLIENT_KEY = process.env.INTRAVERSE_CLIENT_KEY;
   const results = {};
+  const userJwt = getUserJwt(req);
 
-  // --- Games ---
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/public/games?size=5`);
-    results['GET /api/v2/public/games'] = { status: r.status, body: r.body };
-  } catch (e) {
-    results['GET /api/v2/public/games'] = { error: e.message };
-  }
+  const run = async (label, path, options = {}) => {
+    try {
+      const response = await fetchJSON(`${BASE_URL}${path}`, {
+        method: options.method || 'GET',
+        headers: {
+          ...buildAuthHeaders(req, options.auth),
+          ...(options.headers || {}),
+        },
+        body: options.body,
+      });
 
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/public/games/${GAME_SLUG}`);
-    results[`GET /api/v2/public/games/${GAME_SLUG}`] = { status: r.status, body: r.body };
-  } catch (e) {
-    results[`GET /api/v2/public/games/${GAME_SLUG}`] = { error: e.message };
-  }
+      results[label] = {
+        status: response.status,
+        body: response.body,
+      };
+    } catch (error) {
+      results[label] = { error: error.message };
+    }
+  };
 
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/public/games/${GAME_SLUG}/versions`);
-    results[`GET /api/v2/public/games/${GAME_SLUG}/versions`] = { status: r.status, body: r.body };
-  } catch (e) {
-    results[`GET /api/v2/public/games/${GAME_SLUG}/versions`] = { error: e.message };
-  }
+  await run('GET /api/v2/public/games', '/api/v2/public/games?size=5');
+  await run(`GET /api/v2/public/games/${DEFAULT_GAME_SLUG}`, `/api/v2/public/games/${DEFAULT_GAME_SLUG}`);
+  await run(`GET /api/v2/public/games/${DEFAULT_GAME_SLUG}/versions`, `/api/v2/public/games/${DEFAULT_GAME_SLUG}/versions`);
+  await run('GET /api/v2/guilds/public', '/api/v2/guilds/public?size=5');
+  await run(`GET /api/v2/guilds/slug/${DEFAULT_GAME_SLUG}`, `/api/v2/guilds/slug/${DEFAULT_GAME_SLUG}`);
+  await run(`GET /api/v2/tournament/game/${DEFAULT_GAME_SLUG}`, `/api/v2/tournament/game/${DEFAULT_GAME_SLUG}?size=5`);
 
-  // --- Tournaments ---
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/tournament/game/${GAME_SLUG}?size=5`);
-    results[`GET /api/v2/tournament/game/${GAME_SLUG}`] = { status: r.status, body: r.body };
-  } catch (e) {
-    results[`GET /api/v2/tournament/game/${GAME_SLUG}`] = { error: e.message };
-  }
-
-  // --- Guilds ---
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/guilds/public?size=5`);
-    results['GET /api/v2/guilds/public'] = { status: r.status, body: r.body };
-  } catch (e) {
-    results['GET /api/v2/guilds/public'] = { error: e.message };
-  }
-
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/guilds/slug/${GAME_SLUG}`);
-    results[`GET /api/v2/guilds/slug/${GAME_SLUG}`] = { status: r.status, body: r.body };
-  } catch (e) {
-    results[`GET /api/v2/guilds/slug/${GAME_SLUG}`] = { error: e.message };
-  }
-
-  // --- Game Point (server key) — with walletAddress instead of userId ---
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/game-point/`, {
+  if (process.env.INTRAVERSE_SERVER_KEY) {
+    await run('POST /api/v2/game-point/', '/api/v2/game-point/', {
       method: 'POST',
-      headers: { 'x-game-server-key': SERVER_KEY },
+      auth: { includeServerKey: true },
       body: {
         roundId: 'test-round-001',
         walletAddress: '0x0000000000000000000000000000000000000001',
@@ -102,169 +174,147 @@ router.get('/', async (req, res) => {
         roomId: 'test-room-001',
       },
     });
-    results['POST /api/v2/game-point/'] = { status: r.status, body: r.body };
-  } catch (e) {
-    results['POST /api/v2/game-point/'] = { error: e.message };
+  } else {
+    results['POST /api/v2/game-point/'] = { skipped: 'Missing INTRAVERSE_SERVER_KEY' };
   }
 
-  // --- Game Point GET (client key — no user JWT so expect 401, tests endpoint reach) ---
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/game-point/game-client/test-round-001`, {
-      headers: { 'x-game-key': CLIENT_KEY },
+  if (process.env.INTRAVERSE_CLIENT_KEY) {
+    await run('GET /api/v2/game-point/game-client/test-round-001', '/api/v2/game-point/game-client/test-round-001', {
+      auth: { includeClientKey: true, includeUserJwt: true },
     });
-    results['GET /api/v2/game-point/game-client/test-round-001'] = { status: r.status, body: r.body };
-  } catch (e) {
-    results['GET /api/v2/game-point/game-client/test-round-001'] = { error: e.message };
+  } else {
+    results['GET /api/v2/game-point/game-client/test-round-001'] = { skipped: 'Missing INTRAVERSE_CLIENT_KEY' };
   }
 
-  console.log('\n========== INTRAVERSE API TEST RESULTS ==========');
-  for (const [endpoint, result] of Object.entries(results)) {
-    console.log(`\n[${endpoint}]`);
-    console.log(JSON.stringify(result, null, 2));
+  if (userJwt) {
+    await run('GET /api/v2/guilds/me', '/api/v2/guilds/me', {
+      auth: { includeUserJwt: true },
+    });
+    await run('GET /api/v2/guild-tournaments/my', '/api/v2/guild-tournaments/my?size=5', {
+      auth: { includeUserJwt: true },
+    });
+  } else {
+    results['GET /api/v2/guilds/me'] = { skipped: 'Provide a user JWT to test protected guild endpoints' };
+    results['GET /api/v2/guild-tournaments/my'] = { skipped: 'Provide a user JWT to test protected guild endpoints' };
   }
-  console.log('\n=================================================\n');
 
   res.json({
-    note: 'All Intraverse API calls made. Check server logs for full output.',
+    note: 'Smoke test completed for configured Intraverse APIs. Use the individual endpoint cards for ID-based and body-heavy flows.',
     keysLoaded: {
-      serverKey: SERVER_KEY ? `${SERVER_KEY.slice(0, 8)}...` : 'MISSING',
-      clientKey: CLIENT_KEY ? `${CLIENT_KEY.slice(0, 8)}...` : 'MISSING',
+      serverKey: maskKey(process.env.INTRAVERSE_SERVER_KEY),
+      clientKey: maskKey(process.env.INTRAVERSE_CLIENT_KEY),
     },
     results,
   });
 });
 
-// --- Games ---
-
 router.get('/games', async (req, res) => {
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/public/games?size=10`);
-    console.log('[intraverse] GET /api/v2/public/games', r.status, JSON.stringify(r.body, null, 2));
-    res.json({ status: r.status, body: r.body });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  const query = buildQueryString(req.query, ['size', 'orderBy', 'order', 'key', 'direction']);
+  await proxyToIntraverse(req, res, `/api/v2/public/games${query}`);
 });
 
 router.get('/games/:slug', async (req, res) => {
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/public/games/${req.params.slug}`);
-    console.log(`[intraverse] GET /api/v2/public/games/${req.params.slug}`, r.status, JSON.stringify(r.body, null, 2));
-    res.json({ status: r.status, body: r.body });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  await proxyToIntraverse(req, res, `/api/v2/public/games/${req.params.slug}`);
 });
 
 router.get('/games/:slug/versions', async (req, res) => {
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/public/games/${req.params.slug}/versions`);
-    console.log(`[intraverse] GET /api/v2/public/games/${req.params.slug}/versions`, r.status, JSON.stringify(r.body, null, 2));
-    res.json({ status: r.status, body: r.body });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  await proxyToIntraverse(req, res, `/api/v2/public/games/${req.params.slug}/versions`);
 });
 
-// --- Tournaments ---
-
 router.get('/tournaments', async (req, res) => {
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/tournament/game/${GAME_SLUG}?size=10`);
-    console.log('[intraverse] GET /api/v2/tournament/game/' + GAME_SLUG, r.status, JSON.stringify(r.body, null, 2));
-    res.json({ status: r.status, body: r.body });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  const slug = req.query.slug || DEFAULT_GAME_SLUG;
+  const query = buildQueryString(req.query, ['size', 'status', 'key', 'direction']);
+  await proxyToIntraverse(req, res, `/api/v2/tournament/game/${encodeURIComponent(slug)}${query}`);
 });
 
 router.get('/tournaments/:id', async (req, res) => {
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/tournament/${req.params.id}`);
-    console.log(`[intraverse] GET /api/v2/tournament/${req.params.id}`, r.status, JSON.stringify(r.body, null, 2));
-    res.json({ status: r.status, body: r.body });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  await proxyToIntraverse(req, res, `/api/v2/tournament/${req.params.id}`);
 });
 
-// --- Guilds ---
-
 router.get('/guilds', async (req, res) => {
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/guilds/public?size=10`);
-    console.log('[intraverse] GET /api/v2/guilds/public', r.status, JSON.stringify(r.body, null, 2));
-    res.json({ status: r.status, body: r.body });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  const query = buildQueryString(req.query, ['size', 'name', 'orderBy', 'order', 'key', 'direction']);
+  await proxyToIntraverse(req, res, `/api/v2/guilds/public${query}`);
+});
+
+router.get('/guilds/me', async (req, res) => {
+  await proxyToIntraverse(req, res, '/api/v2/guilds/me', {
+    auth: { includeUserJwt: true },
+  });
 });
 
 router.get('/guilds/slug/:slug', async (req, res) => {
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/guilds/slug/${req.params.slug}`);
-    console.log(`[intraverse] GET /api/v2/guilds/slug/${req.params.slug}`, r.status, JSON.stringify(r.body, null, 2));
-    res.json({ status: r.status, body: r.body });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  await proxyToIntraverse(req, res, `/api/v2/guilds/slug/${req.params.slug}`);
+});
+
+router.get('/guilds/:guildId/members/:userId', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/guilds/${req.params.guildId}/members/${req.params.userId}`, {
+    auth: { includeUserJwt: true },
+  });
 });
 
 router.get('/guilds/:id', async (req, res) => {
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/guilds/public/${req.params.id}`);
-    console.log(`[intraverse] GET /api/v2/guilds/public/${req.params.id}`, r.status, JSON.stringify(r.body, null, 2));
-    res.json({ status: r.status, body: r.body });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  await proxyToIntraverse(req, res, `/api/v2/guilds/public/${req.params.id}`);
 });
 
-// --- Drop ---
+router.post('/guild-tournaments', async (req, res) => {
+  await proxyToIntraverse(req, res, '/api/v2/guild-tournaments', {
+    method: 'POST',
+    auth: { includeUserJwt: true },
+    body: req.body,
+  });
+});
+
+router.get('/guild-tournaments/my', async (req, res) => {
+  const query = buildQueryString(req.query, ['size', 'status', 'key', 'direction']);
+  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/my${query}`, {
+    auth: { includeUserJwt: true },
+  });
+});
+
+router.get('/guild-tournaments/:id/treasury', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}/treasury`, {
+    auth: { includeUserJwt: true },
+  });
+});
+
+router.post('/guild-tournaments/:id/launch', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}/launch`, {
+    method: 'POST',
+    auth: { includeUserJwt: true },
+  });
+});
+
+router.get('/guild-tournaments/:id', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}`, {
+    auth: { includeUserJwt: true },
+  });
+});
+
+router.patch('/guild-tournaments/:id', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}`, {
+    method: 'PATCH',
+    auth: { includeUserJwt: true },
+    body: req.body,
+  });
+});
 
 router.get('/drop/:dropId/wallet-nfts', async (req, res) => {
-  const { walletAddress } = req.query;
-  try {
-    const query = walletAddress ? `?walletAddress=${encodeURIComponent(walletAddress)}` : '';
-    const r = await fetchJSON(`${BASE_URL}/api/v2/drop/${req.params.dropId}/walletNFTs${query}`);
-    console.log(`[intraverse] GET /api/v2/drop/${req.params.dropId}/walletNFTs`, r.status, JSON.stringify(r.body, null, 2));
-    res.json({ status: r.status, body: r.body });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  const query = buildQueryString(req.query, ['walletAddress']);
+  await proxyToIntraverse(req, res, `/api/v2/drop/${req.params.dropId}/walletNFTs${query}`);
 });
 
-// --- Game Point ---
-
-// POST — server key, supports walletAddress OR userId
 router.post('/game-point', async (req, res) => {
-  const SERVER_KEY = process.env.INTRAVERSE_SERVER_KEY;
-  try {
-    const r = await fetchJSON(`${BASE_URL}/api/v2/game-point/`, {
-      method: 'POST',
-      headers: { 'x-game-server-key': SERVER_KEY },
-      body: req.body,
-    });
-    console.log('[intraverse] POST /api/v2/game-point/', r.status, JSON.stringify(r.body, null, 2));
-    res.json({ status: r.status, body: r.body });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  await proxyToIntraverse(req, res, '/api/v2/game-point/', {
+    method: 'POST',
+    auth: { includeServerKey: true },
+    body: req.body,
+  });
 });
 
-// GET — client key + user JWT (forward Authorization header if present)
 router.get('/game-point/:roundId', async (req, res) => {
-  const CLIENT_KEY = process.env.INTRAVERSE_CLIENT_KEY;
-  const userJwt = req.headers['x-user-jwt'] || '';
-  try {
-    const headers = { 'x-game-key': CLIENT_KEY };
-    if (userJwt) headers['Authorization'] = `Bearer ${userJwt}`;
-    const r = await fetchJSON(`${BASE_URL}/api/v2/game-point/game-client/${req.params.roundId}`, { headers });
-    console.log(`[intraverse] GET /api/v2/game-point/game-client/${req.params.roundId}`, r.status, JSON.stringify(r.body, null, 2));
-    res.json({ status: r.status, body: r.body });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  await proxyToIntraverse(req, res, `/api/v2/game-point/game-client/${req.params.roundId}`, {
+    auth: { includeClientKey: true, includeUserJwt: true },
+  });
 });
 
 module.exports = router;
