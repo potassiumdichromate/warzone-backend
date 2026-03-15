@@ -21,11 +21,18 @@ function makeId({ address, chainId }) {
   return `${chainId}:${normalized}`;
 }
 
-nonceStateSchema.statics.allocateNonce = async function allocateNonce({ address, chainId, chainNonceFloor }) {
+nonceStateSchema.statics.allocateNonce = async function allocateNonce({
+  address,
+  chainId,
+  chainNonceFloor,
+  maxNonceGap = 5,
+}) {
   if (!Number.isFinite(chainNonceFloor)) throw new Error('allocateNonce requires chainNonceFloor');
 
   const _id = makeId({ address, chainId });
   const addr = String(address).trim().toLowerCase();
+  const gap = Number.isFinite(maxNonceGap) ? Math.max(0, Math.floor(maxNonceGap)) : 0;
+  const ceiling = chainNonceFloor + gap;
 
   // Pipeline update so "max then increment" happens deterministically.
   const update = [
@@ -40,7 +47,14 @@ nonceStateSchema.statics.allocateNonce = async function allocateNonce({ address,
     },
     {
       $set: {
-        _effective: { $max: ['$nextNonce', chainNonceFloor] },
+        // Some RPCs reject txs whose nonce is too far from the current pending nonce.
+        // Clamp any stored "nextNonce" that drifted too far ahead back toward chainNonceFloor.
+        _boundedNext: { $min: ['$nextNonce', ceiling] },
+      },
+    },
+    {
+      $set: {
+        _effective: { $max: ['$_boundedNext', chainNonceFloor] },
       },
     },
     {
@@ -49,7 +63,7 @@ nonceStateSchema.statics.allocateNonce = async function allocateNonce({ address,
         nextNonce: { $add: ['$_effective', 1] },
       },
     },
-    { $unset: '_effective' },
+    { $unset: ['_effective', '_boundedNext'] },
   ];
 
   const doc = await this.findOneAndUpdate({ _id }, update, {
@@ -90,4 +104,3 @@ nonceStateSchema.statics.bumpFloor = async function bumpFloor({ address, chainId
 };
 
 module.exports = mongoose.model('NonceState', nonceStateSchema);
-

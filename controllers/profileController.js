@@ -142,6 +142,7 @@ function getChainConfig() {
   const rpcRetries = Number(readEnv('SOMNIA_RPC_RETRIES', '3'));
   const nonceFloorTtlMs = Number(readEnv('SOMNIA_NONCE_FLOOR_TTL_MS', '2000'));
   const nonceFloorStrategy = readEnv('SOMNIA_NONCE_FLOOR_STRATEGY', 'pending'); // 'pending' | 'pending_latest'
+  const maxNonceGap = 5;
   const chainId = Number(readEnv('SOMNIA_CHAIN_ID', '5031'));
   const networkName = readEnv('SOMNIA_NETWORK_NAME', 'somnia');
   return {
@@ -155,6 +156,7 @@ function getChainConfig() {
     rpcRetries,
     nonceFloorTtlMs,
     nonceFloorStrategy,
+    maxNonceGap,
     chainId,
     networkName,
   };
@@ -300,6 +302,8 @@ function isNonceConflictError(err) {
     err?.code === 'NONCE_EXPIRED' ||
     text.includes('nonce too low') ||
     text.includes('nonce has already been used') ||
+    text.includes('nonce not close enough') ||
+    text.includes('nonce too high') ||
     text.includes('already known') ||
     text.includes('replacement transaction underpriced')
   );
@@ -348,7 +352,7 @@ async function sendContractTx(method, args = [], overrides = {}) {
   const signer = contract.signer;
   const provider = contract.provider || signer.provider;
   const from = (await signer.getAddress()).toLowerCase();
-  const { chainId } = getChainConfig();
+  const { chainId, maxNonceGap } = getChainConfig();
   const dbNonce = useDbNonceManager();
 
   return withNonceLock(async () => {
@@ -358,7 +362,7 @@ async function sendContractTx(method, args = [], overrides = {}) {
 
         let nonce;
         if (dbNonce) {
-          nonce = await NonceState.allocateNonce({ address: from, chainId, chainNonceFloor });
+          nonce = await NonceState.allocateNonce({ address: from, chainId, chainNonceFloor, maxNonceGap });
         } else {
           if (_nextNonce == null) _nextNonce = chainNonceFloor;
           if (_nextNonce < chainNonceFloor) _nextNonce = chainNonceFloor;
@@ -396,6 +400,20 @@ function gasOverrides() {
     return { gasPrice: ethers.utils.parseUnits(String(gasPriceGwei), 'gwei') };
   }
   return {};
+}
+
+function toSafeInt(value, fallback = 0) {
+  if (value == null) return fallback;
+  if (ethers.BigNumber.isBigNumber(value)) {
+    try {
+      return value.toNumber();
+    } catch {
+      const n = Number(value.toString());
+      return Number.isFinite(n) ? n : fallback;
+    }
+  }
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 /**
@@ -457,15 +475,17 @@ async function registerAndStartOnChain(walletAddress, displayName = '') {
     }
 
     let activeId = 0;
+    let activeCheckFailed = false;
     try {
-      activeId = Number(await contract.activeSessionOf(walletAddress) || 0);
+      activeId = toSafeInt(await contract.activeSessionOf(walletAddress), 0);
       perf.step('activeSessionOf', { activeId });
     } catch {
-      result.notes.push('activeSessionOf check failed — attempting start anyway.');
+      activeCheckFailed = true;
+      result.notes.push('activeSessionOf check failed — skipping start to avoid revert.');
       perf.step('activeSessionOf_failed');
     }
 
-    if (!activeId) {
+    if (!activeId && !activeCheckFailed) {
       result.attemptedStart = true;
       const tx2 = await sendContractTx('startGameFor', [walletAddress], overrides);
       result.startTxHash = tx2.hash;
@@ -473,6 +493,8 @@ async function registerAndStartOnChain(walletAddress, displayName = '') {
       const { waitConfirmations: wait2 } = getChainConfig();
       if (wait2 >= 0) await tx2.wait(wait2);
       perf.step('startGameFor_confirmed', { waitConfirmations: wait2 });
+    } else if (activeCheckFailed) {
+      result.notes.push('Start skipped because active session status is unknown.');
     } else {
       result.notes.push(`Game already active (sessionId=${activeId}).`);
     }
@@ -502,11 +524,12 @@ async function endGameIfActive(walletAddress) {
     perf.step('getGameContract');
     let activeId = 0;
     try {
-      activeId = Number(await contract.activeSessionOf(walletAddress) || 0);
+      activeId = toSafeInt(await contract.activeSessionOf(walletAddress), 0);
       perf.step('activeSessionOf', { activeId });
     } catch {
-      result.notes.push('activeSessionOf check failed — attempting end anyway.');
+      result.notes.push('activeSessionOf check failed — skipping end to avoid revert.');
       perf.step('activeSessionOf_failed');
+      return result;
     }
 
     if (!activeId) {

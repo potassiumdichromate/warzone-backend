@@ -53,12 +53,12 @@ const PRODUCTS = [
   { category: 'Gems', product: '500', priceEth: '2.5', enabled: true },
   { category: 'Gems', product: '1000', priceEth: '5', enabled: true },
   // Guns
-  { category: 'Guns', product: 'Shotgun', priceEth: '0.4', enabled: true },
-  { category: 'Guns', product: 'Bullpup', priceEth: '0.8', enabled: true },
-  { category: 'Guns', product: 'ScarH', priceEth: '1', enabled: true },
-  { category: 'Guns', product: 'Sniper Rifle', priceEth: '1.2', enabled: true },
-  { category: 'Guns', product: 'Tesla Mini', priceEth: '1.5', enabled: true },
-  { category: 'Guns', product: 'AWP', priceEth: '2', enabled: true },
+  { category: 'Guns', product: 'Shotgun', priceEth: '0.8', enabled: true },
+  { category: 'Guns', product: 'Bullpup', priceEth: '1.6', enabled: true },
+  { category: 'Guns', product: 'ScarH', priceEth: '2', enabled: true },
+  { category: 'Guns', product: 'Sniper Rifle', priceEth: '2.4', enabled: true },
+  { category: 'Guns', product: 'Tesla Mini', priceEth: '3', enabled: true },
+  { category: 'Guns', product: 'AWP', priceEth: '4', enabled: true },
 ];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

@@ -32,8 +32,11 @@ const allowedOrigins = [
   'http://warzonewarriors.xyz',
   'http://localhost:3000',
   'http://localhost:3001',
-  'https://warzonewarrior.vercel.app/',
+  'http://localhost:5173',
+  'http://localhost:5174',
   'https://warzonewarrior.vercel.app',
+  'https://warzonewarrior-chinese.vercel.app',
+  'https://cn.warzonewarriors.xyz',
   'https://warzone-admin.vercel.app/',
   'https://pub-2c48e58780b648b7a2a77316f7b0aa2c.r2.dev'
 ];
