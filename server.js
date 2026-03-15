@@ -5,6 +5,7 @@ const dotenv = require('dotenv');
 // Ensure env is loaded before importing modules that read it
 dotenv.config();
 const profileRoutes = require('./routes/profileRoutes');
+const intraverseTestRoutes = require('./routes/intraverseTestRoutes');
 const app = express();
 const SLOW_REQUEST_MS = Number(process.env.SLOW_REQUEST_MS || 2000);
 const SLOW_MONGO_MS = Number(process.env.SLOW_MONGO_MS || 200);
@@ -92,6 +93,7 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use('/warzone/test/intraverse', intraverseTestRoutes);
 app.use('/warzone', profileRoutes);
 
 
