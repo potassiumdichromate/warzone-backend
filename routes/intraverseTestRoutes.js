@@ -6,7 +6,7 @@ const PlayerProfile = require('../models/PlayerProfile');
 
 const router = express.Router();
 
-const BASE_URL = process.env.INTRAVERSE_BASE_URL || 'https://api.intraverse.io';
+const BASE_URL = process.env.INTRAVERSE_BASE_URL || 'https://api-stage.intraverse.io';
 const DEFAULT_GAME_SLUG = process.env.INTRAVERSE_GAME_SLUG || 'kult-games';
 
 function getPlayBaseUrl() {
@@ -14,13 +14,13 @@ function getPlayBaseUrl() {
     return process.env.INTRAVERSE_PLAY_BASE_URL;
   }
 
-  if (BASE_URL.includes('api-stage.intraverse.io')) {
-    return 'https://play-stage.intraverse.io';
-  }
+  // if (BASE_URL.includes('api-stage.intraverse.io')) {
+  //   return 'https://play-stage.intraverse.io';
+  // }
 
-  if (BASE_URL.includes('api.intraverse.io')) {
-    return 'https://play.intraverse.io';
-  }
+  // if (BASE_URL.includes('api.intraverse.io')) {
+  //   return 'https://play.intraverse.io';
+  // }
 
   return 'https://play-stage.intraverse.io';
 }
