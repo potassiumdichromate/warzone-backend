@@ -1,10 +1,27 @@
 const express = require('express');
 const https = require('https');
+const crypto = require('crypto');
 
 const router = express.Router();
 
 const BASE_URL = process.env.INTRAVERSE_BASE_URL || 'https://api.intraverse.io';
 const DEFAULT_GAME_SLUG = process.env.INTRAVERSE_GAME_SLUG || 'kult-games';
+
+function getPlayBaseUrl() {
+  if (process.env.INTRAVERSE_PLAY_BASE_URL) {
+    return process.env.INTRAVERSE_PLAY_BASE_URL;
+  }
+
+  if (BASE_URL.includes('api-stage.intraverse.io')) {
+    return 'https://play-stage.intraverse.io';
+  }
+
+  if (BASE_URL.includes('api.intraverse.io')) {
+    return 'https://play.intraverse.io';
+  }
+
+  return 'https://play-stage.intraverse.io';
+}
 
 function fetchJSON(url, options = {}) {
   return new Promise((resolve, reject) => {
@@ -41,10 +58,6 @@ function fetchJSON(url, options = {}) {
 
     req.end();
   });
-}
-
-function maskKey(key) {
-  return key ? `${key.slice(0, 8)}...` : 'MISSING';
 }
 
 function buildQueryString(source, allowedKeys) {
@@ -117,94 +130,46 @@ async function proxyToIntraverse(req, res, path, options = {}) {
   }
 }
 
-router.get('/meta', (req, res) => {
-  res.json({
-    baseUrl: BASE_URL,
-    defaultGameSlug: DEFAULT_GAME_SLUG,
-    keysLoaded: {
-      serverKey: maskKey(process.env.INTRAVERSE_SERVER_KEY),
-      clientKey: maskKey(process.env.INTRAVERSE_CLIENT_KEY),
-    },
-    frontendNeeds: {
-      userJwtForProtectedEndpoints: true,
-      gameKeysInFrontend: false,
-    },
+router.get('/auth/magic-link', (req, res) => {
+  const clientKey = String(process.env.INTRAVERSE_CLIENT_KEY || '').trim();
+  if (!clientKey) {
+    return res.status(500).json({
+      success: false,
+      message: 'INTRAVERSE_CLIENT_KEY is not configured on the server.',
+    });
+  }
+
+  const authHash = crypto.randomUUID();
+  const playBaseUrl = getPlayBaseUrl();
+  const magicLoginUrl = `${playBaseUrl}/magic-login?hash=${encodeURIComponent(authHash)}&game=${encodeURIComponent(clientKey)}`;
+
+  return res.json({
+    success: true,
+    authHash,
+    clientKey,
+    playBaseUrl,
+    magicLoginUrl,
   });
 });
 
-router.get('/', async (req, res) => {
-  const results = {};
-  const userJwt = getUserJwt(req);
+router.post('/auth/user-login', (req, res) => {
+  const authHeader = String(req.headers.authorization || '').trim();
+  const bodyToken = String(req.body?.idToken || req.body?.token || '').trim();
+  const token = authHeader.toLowerCase().startsWith('bearer ')
+    ? authHeader.slice(7).trim()
+    : bodyToken;
 
-  const run = async (label, path, options = {}) => {
-    try {
-      const response = await fetchJSON(`${BASE_URL}${path}`, {
-        method: options.method || 'GET',
-        headers: {
-          ...buildAuthHeaders(req, options.auth),
-          ...(options.headers || {}),
-        },
-        body: options.body,
-      });
-
-      results[label] = {
-        status: response.status,
-        body: response.body,
-      };
-    } catch (error) {
-      results[label] = { error: error.message };
-    }
-  };
-
-  await run('GET /api/v2/public/games', '/api/v2/public/games?size=5');
-  await run(`GET /api/v2/public/games/${DEFAULT_GAME_SLUG}`, `/api/v2/public/games/${DEFAULT_GAME_SLUG}`);
-  await run(`GET /api/v2/public/games/${DEFAULT_GAME_SLUG}/versions`, `/api/v2/public/games/${DEFAULT_GAME_SLUG}/versions`);
-  await run('GET /api/v2/guilds/public', '/api/v2/guilds/public?size=5');
-  await run(`GET /api/v2/guilds/slug/${DEFAULT_GAME_SLUG}`, `/api/v2/guilds/slug/${DEFAULT_GAME_SLUG}`);
-  await run(`GET /api/v2/tournament/game/${DEFAULT_GAME_SLUG}`, `/api/v2/tournament/game/${DEFAULT_GAME_SLUG}?size=5`);
-
-  if (process.env.INTRAVERSE_SERVER_KEY) {
-    await run('POST /api/v2/game-point/', '/api/v2/game-point/', {
-      method: 'POST',
-      auth: { includeServerKey: true },
-      body: {
-        roundId: 'test-round-001',
-        walletAddress: '0x0000000000000000000000000000000000000001',
-        score: 100,
-        roomId: 'test-room-001',
-      },
+  if (!token) {
+    return res.status(400).json({
+      success: false,
+      message: 'Missing idToken/token. Provide Authorization: Bearer <token> or { idToken } in body.',
     });
-  } else {
-    results['POST /api/v2/game-point/'] = { skipped: 'Missing INTRAVERSE_SERVER_KEY' };
   }
 
-  if (process.env.INTRAVERSE_CLIENT_KEY) {
-    await run('GET /api/v2/game-point/game-client/test-round-001', '/api/v2/game-point/game-client/test-round-001', {
-      auth: { includeClientKey: true, includeUserJwt: true },
-    });
-  } else {
-    results['GET /api/v2/game-point/game-client/test-round-001'] = { skipped: 'Missing INTRAVERSE_CLIENT_KEY' };
-  }
-
-  if (userJwt) {
-    await run('GET /api/v2/guilds/me', '/api/v2/guilds/me', {
-      auth: { includeUserJwt: true },
-    });
-    await run('GET /api/v2/guild-tournaments/my', '/api/v2/guild-tournaments/my?size=5', {
-      auth: { includeUserJwt: true },
-    });
-  } else {
-    results['GET /api/v2/guilds/me'] = { skipped: 'Provide a user JWT to test protected guild endpoints' };
-    results['GET /api/v2/guild-tournaments/my'] = { skipped: 'Provide a user JWT to test protected guild endpoints' };
-  }
-
-  res.json({
-    note: 'Smoke test completed for configured Intraverse APIs. Use the individual endpoint cards for ID-based and body-heavy flows.',
-    keysLoaded: {
-      serverKey: maskKey(process.env.INTRAVERSE_SERVER_KEY),
-      clientKey: maskKey(process.env.INTRAVERSE_CLIENT_KEY),
-    },
-    results,
+  return res.json({
+    success: true,
+    userLogin: true,
+    tokenPreview: `${token.slice(0, 12)}...`,
   });
 });
 
@@ -229,78 +194,6 @@ router.get('/tournaments', async (req, res) => {
 
 router.get('/tournaments/:id', async (req, res) => {
   await proxyToIntraverse(req, res, `/api/v2/tournament/${req.params.id}`);
-});
-
-router.get('/guilds', async (req, res) => {
-  const query = buildQueryString(req.query, ['size', 'name', 'orderBy', 'order', 'key', 'direction']);
-  await proxyToIntraverse(req, res, `/api/v2/guilds/public${query}`);
-});
-
-router.get('/guilds/me', async (req, res) => {
-  await proxyToIntraverse(req, res, '/api/v2/guilds/me', {
-    auth: { includeUserJwt: true },
-  });
-});
-
-router.get('/guilds/slug/:slug', async (req, res) => {
-  await proxyToIntraverse(req, res, `/api/v2/guilds/slug/${req.params.slug}`);
-});
-
-router.get('/guilds/:guildId/members/:userId', async (req, res) => {
-  await proxyToIntraverse(req, res, `/api/v2/guilds/${req.params.guildId}/members/${req.params.userId}`, {
-    auth: { includeUserJwt: true },
-  });
-});
-
-router.get('/guilds/:id', async (req, res) => {
-  await proxyToIntraverse(req, res, `/api/v2/guilds/public/${req.params.id}`);
-});
-
-router.post('/guild-tournaments', async (req, res) => {
-  await proxyToIntraverse(req, res, '/api/v2/guild-tournaments', {
-    method: 'POST',
-    auth: { includeUserJwt: true },
-    body: req.body,
-  });
-});
-
-router.get('/guild-tournaments/my', async (req, res) => {
-  const query = buildQueryString(req.query, ['size', 'status', 'key', 'direction']);
-  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/my${query}`, {
-    auth: { includeUserJwt: true },
-  });
-});
-
-router.get('/guild-tournaments/:id/treasury', async (req, res) => {
-  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}/treasury`, {
-    auth: { includeUserJwt: true },
-  });
-});
-
-router.post('/guild-tournaments/:id/launch', async (req, res) => {
-  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}/launch`, {
-    method: 'POST',
-    auth: { includeUserJwt: true },
-  });
-});
-
-router.get('/guild-tournaments/:id', async (req, res) => {
-  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}`, {
-    auth: { includeUserJwt: true },
-  });
-});
-
-router.patch('/guild-tournaments/:id', async (req, res) => {
-  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}`, {
-    method: 'PATCH',
-    auth: { includeUserJwt: true },
-    body: req.body,
-  });
-});
-
-router.get('/drop/:dropId/wallet-nfts', async (req, res) => {
-  const query = buildQueryString(req.query, ['walletAddress']);
-  await proxyToIntraverse(req, res, `/api/v2/drop/${req.params.dropId}/walletNFTs${query}`);
 });
 
 router.post('/game-point', async (req, res) => {
