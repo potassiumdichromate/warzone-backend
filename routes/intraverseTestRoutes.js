@@ -1,6 +1,8 @@
 const express = require('express');
 const https = require('https');
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const PlayerProfile = require('../models/PlayerProfile');
 
 const router = express.Router();
 
@@ -88,6 +90,42 @@ function getUserJwt(req) {
   return forwardedJwt;
 }
 
+function decodeJwtPayload(token) {
+  try {
+    const parts = String(token || '').split('.');
+    if (parts.length < 2) return null;
+    const payloadBase64 = parts[1]
+      .replace(/-/g, '+')
+      .replace(/_/g, '/');
+    const json = Buffer.from(payloadBase64, 'base64').toString('utf8');
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+function pickPrimaryWalletAddress(payload) {
+  const wallets = Array.isArray(payload?.wallets) ? payload.wallets : [];
+  if (wallets.length === 0) return '';
+
+  const ethereumWallet = wallets.find((item) => String(item?.chain || '').toLowerCase() === 'ethereum');
+  if (ethereumWallet?.walletAddress) return String(ethereumWallet.walletAddress).trim().toLowerCase();
+
+  const first = wallets[0];
+  return String(first?.walletAddress || '').trim().toLowerCase();
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function walletAddressCaseInsensitiveQuery(walletAddress) {
+  const normalized = String(walletAddress || '').trim().toLowerCase();
+  return {
+    walletAddress: { $regex: new RegExp(`^${escapeRegex(normalized)}$`, 'i') },
+  };
+}
+
 function buildAuthHeaders(req, { includeClientKey = false, includeServerKey = false, includeUserJwt = false } = {}) {
   const headers = {};
 
@@ -152,24 +190,145 @@ router.get('/auth/magic-link', (req, res) => {
   });
 });
 
-router.post('/auth/user-login', (req, res) => {
+router.post('/auth/user-login', async (req, res) => {
   const authHeader = String(req.headers.authorization || '').trim();
   const bodyToken = String(req.body?.idToken || req.body?.token || '').trim();
   const token = authHeader.toLowerCase().startsWith('bearer ')
     ? authHeader.slice(7).trim()
     : bodyToken;
+  const bodyUserId = String(req.body?.userId || req.body?.user || '').trim();
+
+  if (!token && !bodyUserId) {
+    return res.status(400).json({
+      success: false,
+      message: 'Missing user identity. Provide { userId } or { idToken }.',
+    });
+  }
+
+  const decoded = token ? decodeJwtPayload(token) : null;
+  const intraverseUserId = bodyUserId
+    || String(decoded?.user_id || decoded?.sub || '').trim();
+
+  if (!intraverseUserId) {
+    return res.status(400).json({
+      success: false,
+      message: 'Unable to extract userId from payload/token.',
+    });
+  }
 
   if (!token) {
     return res.status(400).json({
       success: false,
-      message: 'Missing idToken/token. Provide Authorization: Bearer <token> or { idToken } in body.',
+      message: 'idToken is required to fetch wallet details from Intraverse.',
     });
   }
+
+  const serverKey = String(process.env.INTRAVERSE_SERVER_KEY || '').trim();
+  if (!serverKey) {
+    return res.status(500).json({
+      success: false,
+      message: 'INTRAVERSE_SERVER_KEY is not configured on the server.',
+    });
+  }
+
+  let userGameProfile = null;
+  try {
+    const response = await fetchJSON(`${BASE_URL}/api/v2/user/${encodeURIComponent(intraverseUserId)}/game`, {
+      method: 'GET',
+      headers: {
+        accept: 'application/json',
+        'x-game-server-key': serverKey,
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      return res.status(response.status).json({
+        success: false,
+        message: 'Intraverse user lookup failed.',
+        intraverseStatus: response.status,
+        intraverseBody: response.body,
+      });
+    }
+
+    userGameProfile = response.body;
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to call Intraverse user lookup API.',
+      error: error.message,
+    });
+  }
+
+  const walletAddress = pickPrimaryWalletAddress(userGameProfile);
+  if (!walletAddress) {
+    return res.status(400).json({
+      success: false,
+      message: 'No walletAddress found in Intraverse user profile.',
+      intraverseUserId,
+      intraverseProfile: userGameProfile,
+    });
+  }
+
+  const jwtSecret = process.env.JWT_SECRET || 'your-secret-key';
+  const jwtExpiresIn = process.env.JWT_EXPIRES_IN || '7d';
+  const backendToken = jwt.sign(
+    { walletAddress, intraverseUserId },
+    jwtSecret,
+    { expiresIn: jwtExpiresIn },
+  );
+
+  const now = Math.floor(Date.now() / 1000);
+  const userName = String(decoded?.name || userGameProfile?.username || '').trim();
+
+  try {
+    const profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(walletAddress));
+    if (profile) {
+      profile.Intraverse = {
+        userId: intraverseUserId,
+        userName,
+      };
+      await profile.save();
+    } else {
+      await PlayerProfile.create({
+        walletAddress,
+        Intraverse: {
+          userId: intraverseUserId,
+          userName,
+        },
+      });
+    }
+  } catch (dbError) {
+    console.error('[intraverse] failed to persist intraverse profile:', dbError);
+  }
+
+  const user = {
+    userId: intraverseUserId,
+    name: userName,
+    roles: Array.isArray(decoded?.roles) ? decoded.roles : [],
+    scope: decoded?.scope || '',
+    issuer: decoded?.iss || '',
+    audience: decoded?.aud || '',
+    authTime: decoded?.auth_time || null,
+    issuedAt: decoded?.iat || null,
+    expiresAt: decoded?.exp || null,
+    isExpired: decoded?.exp ? Number(decoded.exp) <= now : null,
+    provider: decoded?.firebase?.sign_in_provider || '',
+    walletAddress,
+  };
 
   return res.json({
     success: true,
     userLogin: true,
-    tokenPreview: `${token.slice(0, 12)}...`,
+    intraverseUserId,
+    walletAddress,
+    token: backendToken,
+    Intraverse: {
+      userId: intraverseUserId,
+      userName,
+    },
+    user,
+    intraverseProfile: userGameProfile,
   });
 });
 

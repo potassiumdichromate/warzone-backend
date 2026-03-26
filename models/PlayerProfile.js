@@ -303,6 +303,11 @@ const DailyQuestSchema = new Schema({
 const PlayerProfileSchema = new Schema({
   walletAddress: { type: String, required: true, unique: true, index: true },
 
+  Intraverse: {
+    userId: { type: String, default: '' },
+    userName: { type: String, default: '' },
+  },
+
   PlayerProfile: {
     level: { type: Number, default: 1 },
     exp:   { type: Number, default: 0 },
