@@ -6,7 +6,7 @@ const { getSpecificDBLeaderboard } = require('../controllers/newDBController');
 const verifyUser = require('../routes/middleware/verifyUser');
 
 const iapController = require('../controllers/iap.controller');
-// In-memory pricing exposure for store UI (Coins/Gems only)
+const trashTalkController = require('../controllers/trashTalkController');
 
 
 router.get('/', getProfile);
@@ -20,6 +20,9 @@ router.post('/name', checkNameExistance);
 router.post('/saveName', verifyUser, saveName);
 router.get('/name', verifyUser, getName);
 router.post('/login', login);
+
+router.post('/trash-talk/generate', trashTalkController.generateTrashTalk);
+router.get('/trash-talk/line', trashTalkController.getTrashLine);
 
 router.get("/health", (req, res) => {
   res.status(200).json({

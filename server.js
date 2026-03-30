@@ -182,6 +182,6 @@ mongoose.connect(process.env.MONGO_URI, {
 const PORT = process.env.PORT || 3300;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  // console.log(`🌐 Accepting requests from: warzonewarriors.xyz`);
-  // console.log(`📡 CORS enabled for cross-origin requests`);
+  const { warmUp } = require('./utils/trashTalkPool');
+  warmUp().catch((e) => console.warn('[trash-pool] warm-up failed:', e.message));
 });
