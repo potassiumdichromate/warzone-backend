@@ -89,6 +89,7 @@ exports.getSpecificDBLeaderboard = async (req, res) => {
   try {
     const { AltProfile, AltNameWallet } = await getAltModels();
     perf.step('getAltModels');
+    const walletAddress = String(req.query.walletAddress || '').trim();
 
     const docs = await AltProfile
       .find()
@@ -110,9 +111,15 @@ exports.getSpecificDBLeaderboard = async (req, res) => {
       };
     });
 
+    let profile = null;
+    if (walletAddress) {
+      const walletLower = walletAddress.toLowerCase();
+      profile = data.find((item) => String(item.walletAddress || '').toLowerCase() === walletLower) || null;
+    }
+
     perf.step('map_response');
-    perf.done({ count: data.length });
-    res.json({ success: true, count: data.length, data });
+    perf.done({ count: data.length, hasProfile: Boolean(profile) });
+    res.json({ success: true, count: data.length, data, profile });
   } catch (err) {
     console.error('getSpecificDBLeaderboard error:', err);
     res.status(500).json({ success: false, message: 'Failed to fetch data from specific DB' });
