@@ -3,6 +3,8 @@ const https = require('https');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const PlayerProfile = require('../models/PlayerProfile');
+const TournamentMetadata = require('../models/TournamentMetadata');
+const PlayerRoundParticipation = require('../models/PlayerRoundParticipation');
 
 const router = express.Router();
 
@@ -351,16 +353,221 @@ router.get('/tournaments', async (req, res) => {
   await proxyToIntraverse(req, res, `/api/v2/tournament/game/${encodeURIComponent(slug)}${query}`);
 });
 
+// ── Guild tournament CRUD (requires Intraverse user JWT via Authorization header) ──
+
+router.post('/guild-tournaments', async (req, res) => {
+  await proxyToIntraverse(req, res, '/api/v2/guild-tournaments', {
+    method: 'POST',
+    auth: { includeUserJwt: true },
+    body: req.body,
+  });
+});
+
+router.get('/guild-tournaments/my', async (req, res) => {
+  const query = buildQueryString(req.query, ['size', 'status', 'guildId', 'requestedBy', 'key', 'direction']);
+  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/my${query}`, {
+    auth: { includeUserJwt: true },
+  });
+});
+
+router.get('/guild-tournaments/:id', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}`, {
+    auth: { includeUserJwt: true },
+  });
+});
+
+router.patch('/guild-tournaments/:id', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}`, {
+    method: 'PATCH',
+    auth: { includeUserJwt: true },
+    body: req.body,
+  });
+});
+
+router.post('/guild-tournaments/:id/launch', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}/launch`, {
+    method: 'POST',
+    auth: { includeUserJwt: true },
+  });
+});
+
+router.get('/guild-tournaments/:id/treasury', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/guild-tournaments/${req.params.id}/treasury`, {
+    auth: { includeUserJwt: true },
+  });
+});
+
+// Must be before /tournaments/:id to avoid Express treating 'slug' as an id
+router.get('/tournaments/slug/:slug/active-round', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/tournament/slug/${encodeURIComponent(req.params.slug)}/activeRound`);
+});
+
 router.get('/tournaments/:id', async (req, res) => {
   await proxyToIntraverse(req, res, `/api/v2/tournament/${req.params.id}`);
 });
 
-router.post('/game-point', async (req, res) => {
-  await proxyToIntraverse(req, res, '/api/v2/game-point/', {
+router.get('/tournaments/:id/drops', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/tournament/${req.params.id}/drops/`);
+});
+
+router.get('/tournaments/:id/stakes', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/tournament/${req.params.id}/stakes/`);
+});
+
+router.get('/tournaments/:id/projects', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/tournament/${req.params.id}/projects/`);
+});
+
+router.get('/tournaments/:id/wallet-level', async (req, res) => {
+  const query = buildQueryString(req.query, ['walletAddress', 'projectId']);
+  await proxyToIntraverse(req, res, `/api/v2/tournament/${req.params.id}/walletLevel${query}`, {
+    auth: { includeClientKey: true },
+  });
+});
+
+router.post('/tournaments/:id/calculate-score', async (req, res) => {
+  await proxyToIntraverse(req, res, `/api/v2/tournament/${req.params.id}/calculateScore`, {
     method: 'POST',
     auth: { includeServerKey: true },
     body: req.body,
   });
+});
+
+// --- Tournament helpers ---
+
+async function getOrCreateRoundParticipation(walletAddress, roundId, baselineCoin, { kills, deaths, metadata } = {}) {
+  let participation = await PlayerRoundParticipation.findOne({
+    walletAddress: { $regex: new RegExp(`^${walletAddress.trim()}$`, 'i') },
+    roundId,
+  });
+  if (!participation) {
+    participation = new PlayerRoundParticipation({
+      walletAddress, roundId, baselineCoin, roundPoints: 0,
+      kills: kills || 0, deaths: deaths || 0, metadata: metadata || {},
+    });
+    await participation.save();
+    console.log(`[intraverse] Baseline ${baselineCoin} set for ${walletAddress} in round ${roundId}`);
+  }
+  return participation;
+}
+
+// Returns the differential score (coins earned this round), or null if profile not found
+async function computeDifferentialScore(walletAddress, roundId, { kills, deaths, metadata } = {}) {
+  const profile = await PlayerProfile.findOne({
+    walletAddress: { $regex: new RegExp(`^${walletAddress.trim()}$`, 'i') },
+  });
+  if (!profile) return null;
+
+  const currentCoins = Number(profile.PlayerResources?.coin) || 0;
+  const participation = await getOrCreateRoundParticipation(walletAddress, roundId, currentCoins, { kills, deaths, metadata });
+
+  const delta = Math.max(0, currentCoins - Number(participation.baselineCoin));
+  participation.roundPoints = delta;
+  if (kills !== undefined) participation.kills = kills;
+  if (deaths !== undefined) participation.deaths = deaths;
+  if (metadata) participation.metadata = metadata;
+  participation.lastUpdated = new Date();
+  await participation.save();
+
+  console.log(`[intraverse] Differential scoring: Total=${currentCoins}, Baseline=${participation.baselineCoin}, Delta=${delta}`);
+  return delta;
+}
+
+async function upsertTournamentFromIntraverse(t) {
+  const doc = {
+    tournamentId: t.id, name: t.name, slug: t.slug,
+    gameId: t.gameId, organizationId: t.organizationId,
+    startDate: t.startDate, endDate: t.endDate,
+    rounds: (t.rounds || []).map(r => ({
+      id: r.id, name: r.name, title: r.title,
+      intervals: r.intervals || [], createdAt: r.createdAt, updatedAt: r.updatedAt,
+    })),
+    rules: t.rules || '', lastSynced: new Date(),
+  };
+  await TournamentMetadata.findOneAndUpdate({ tournamentId: t.id }, doc, { upsert: true, new: true });
+  return { id: t.id, name: t.name };
+}
+
+// --- Routes ---
+
+// Join a round — establishes baseline coins, returns participation record
+router.post('/tournaments/:id/rounds/:roundId/join', async (req, res) => {
+  const { walletAddress } = req.body;
+  if (!walletAddress) return res.status(400).json({ error: 'walletAddress is required' });
+  try {
+    const profile = await PlayerProfile.findOne({
+      walletAddress: { $regex: new RegExp(`^${walletAddress.trim()}$`, 'i') },
+    });
+    if (!profile) return res.status(404).json({ error: 'Player profile not found' });
+
+    const baselineCoin = Number(profile.PlayerResources?.coin) || 0;
+    let participation = await PlayerRoundParticipation.findOne({
+      walletAddress: { $regex: new RegExp(`^${walletAddress.trim()}$`, 'i') },
+      roundId: req.params.roundId,
+    });
+
+    if (!participation) {
+      participation = new PlayerRoundParticipation({
+        walletAddress, roundId: req.params.roundId,
+        tournamentId: req.params.id, baselineCoin, roundPoints: 0,
+      });
+      await participation.save();
+      console.log(`[intraverse] ${walletAddress} joined round ${req.params.roundId} with baseline ${baselineCoin}`);
+    }
+
+    res.json({ success: true, joined: true, baselineCoin: participation.baselineCoin, roundPoints: participation.roundPoints });
+  } catch (err) {
+    console.error('[intraverse] join error:', err);
+    res.status(500).json({ error: 'Failed to join round' });
+  }
+});
+
+router.post('/game-point', async (req, res) => {
+  const { roundId, walletAddress, roomId, kills, deaths, metadata } = req.body;
+  if (!roundId || !walletAddress) {
+    return res.status(400).json({ error: 'roundId and walletAddress are required' });
+  }
+  try {
+    const delta = await computeDifferentialScore(walletAddress, roundId, { kills, deaths, metadata });
+    if (delta === null) return res.status(404).json({ error: 'Player profile not found' });
+    await proxyToIntraverse(req, res, '/api/v2/game-point/', {
+      method: 'POST',
+      auth: { includeServerKey: true },
+      body: { roundId, roomId: String(roomId || `warzone-${Date.now()}`).slice(0, 64), score: Number(delta), walletAddress },
+    });
+  } catch (err) {
+    console.error('[intraverse] game-point error:', err);
+    res.status(500).json({ error: 'Failed to process game point' });
+  }
+});
+
+router.post('/sync-tournaments', async (req, res) => {
+  try {
+    const slug = req.query.slug || DEFAULT_GAME_SLUG;
+    const query = buildQueryString({ ...req.query, size: req.query.size || 10 }, ['size', 'status', 'key', 'direction']);
+    const response = await fetchJSON(`${BASE_URL}/api/v2/tournament/game/${encodeURIComponent(slug)}${query}`, {
+      method: 'GET',
+      headers: buildAuthHeaders(req, { includeServerKey: true }),
+    });
+    if (response.status !== 200) {
+      return res.status(response.status).json({ message: 'Failed to fetch tournaments from Intraverse', body: response.body });
+    }
+    const synced = await Promise.all((response.body?.data || []).map(upsertTournamentFromIntraverse));
+    res.json({ success: true, synced });
+  } catch (err) {
+    console.error('[intraverse] sync-tournaments error:', err);
+    res.status(500).json({ error: 'Failed to sync tournaments' });
+  }
+});
+
+router.get('/tournaments/:id/rounds/:roundId/players', async (req, res) => {
+  try {
+    const players = await PlayerRoundParticipation.find({ roundId: req.params.roundId }).sort({ roundPoints: -1 });
+    res.json({ success: true, roundId: req.params.roundId, players });
+  } catch (err) {
+    console.error('[intraverse] get round players error:', err);
+    res.status(500).json({ error: 'Failed to fetch round players' });
+  }
 });
 
 router.get('/game-point/:roundId', async (req, res) => {

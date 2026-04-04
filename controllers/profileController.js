@@ -591,6 +591,7 @@ function normalizeProfile(obj) {
   };
   for (const [k, v] of Object.entries(defaultData)) ensure(k, v);
 
+
   if (obj.PlayerCampaignProgress == null) obj.PlayerCampaignProgress = {};
   if (obj.PlayerCampaignStageProgress == null) obj.PlayerCampaignStageProgress = {};
   if (obj.PlayerCampaignRewardProgress == null) obj.PlayerCampaignRewardProgress = {};
