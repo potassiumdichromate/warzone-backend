@@ -31,6 +31,7 @@ const allowedOrigins = [
   'http://www.warzonewarriors.xyz',
   'http://warzonewarriors.xyz',
   'http://localhost:3000',
+  'http://localhost:8080',
   'http://localhost:3001',
   'http://localhost:5173',
   'http://localhost:5174',
