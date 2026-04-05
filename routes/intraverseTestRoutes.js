@@ -461,7 +461,10 @@ async function computeDifferentialScore(walletAddress, roundId, { kills, deaths,
   const currentCoins = Number(profile.PlayerResources?.coin) || 0;
   const participation = await getOrCreateRoundParticipation(walletAddress, roundId, currentCoins, { kills, deaths, metadata });
 
+  const previousRoundPoints = Number(participation.roundPoints) || 0;
   const delta = Math.max(0, currentCoins - Number(participation.baselineCoin));
+  const expGain = Math.max(0, delta - previousRoundPoints);
+
   participation.roundPoints = delta;
   if (kills !== undefined) participation.kills = kills;
   if (deaths !== undefined) participation.deaths = deaths;
@@ -469,7 +472,17 @@ async function computeDifferentialScore(walletAddress, roundId, { kills, deaths,
   participation.lastUpdated = new Date();
   await participation.save();
 
-  console.log(`[intraverse] Differential scoring: Total=${currentCoins}, Baseline=${participation.baselineCoin}, Delta=${delta}`);
+  if (expGain > 0) {
+    if (!profile.PlayerProfile) {
+      profile.PlayerProfile = { exp: 0 };
+    }
+    profile.PlayerProfile.exp = (Number(profile.PlayerProfile.exp) || 0) + expGain;
+    await profile.save();
+  }
+
+  console.log(
+    `[intraverse] Differential scoring: Total=${currentCoins}, Baseline=${participation.baselineCoin}, Delta=${delta}, expGain=${expGain}`,
+  );
   return delta;
 }
 
