@@ -99,7 +99,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use('/warzone/test/intraverse', intraverseTestRoutes);
+app.use('/warzone/intraverse', intraverseTestRoutes);
 app.use('/warzone', profileRoutes);
 
 
