@@ -16,13 +16,13 @@ function getPlayBaseUrl() {
     return process.env.INTRAVERSE_PLAY_BASE_URL;
   }
 
-  // if (BASE_URL.includes('api-stage.intraverse.io')) {
-  //   return 'https://play-stage.intraverse.io';
-  // }
+  if (BASE_URL.includes('api-stage.intraverse.io')) {
+    return 'https://play-stage.intraverse.io';
+  }
 
-  // if (BASE_URL.includes('api.intraverse.io')) {
-  //   return 'https://play.intraverse.io';
-  // }
+  if (BASE_URL.includes('api.intraverse.io')) {
+    return 'https://play.intraverse.io';
+  }
 
   return 'https://play-stage.intraverse.io';
 }
