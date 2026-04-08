@@ -216,17 +216,22 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
     const okHttp = intrabaseStatus >= 200 && intrabaseStatus < 300;
     const ivPayloadBase = {
       ts: new Date().toISOString(),
+      event: okHttp ? 'game_point_ok' : 'game_point_http_error',
+      /** Intraverse only accepts `score` (tournament points). It does not mirror PlayerResources.coin. */
+      what: 'intraverse_tournament_score_sync',
       wallet: shortWallet(w),
       roundId: String(roundId),
+      profileCoin: coins,
+      roundBaselineCoin: Number(participation.baselineCoin) || 0,
       scoreSent: cumulativeDelta,
       medalAdded,
       httpStatus: intrabaseStatus,
       response: snippet(intrabaseBody),
     };
     if (okHttp) {
-      console.log('[tournament-intraverse]', { event: 'game_point_ok', ...ivPayloadBase });
+      console.log('[tournament-intraverse]', ivPayloadBase);
     } else {
-      console.warn('[tournament-intraverse]', { event: 'game_point_http_error', ...ivPayloadBase });
+      console.warn('[tournament-intraverse]', ivPayloadBase);
     }
   } catch (err) {
     intrabaseStatus = 0;
@@ -234,8 +239,11 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
     console.warn('[tournament-intraverse]', {
       ts: new Date().toISOString(),
       event: 'game_point_request_failed',
+      what: 'intraverse_tournament_score_sync',
       wallet: shortWallet(w),
       roundId: String(roundId),
+      profileCoin: coins,
+      roundBaselineCoin: Number(participation.baselineCoin) || 0,
       scoreSent: cumulativeDelta,
       medalAdded,
       message: err.message || String(err),
