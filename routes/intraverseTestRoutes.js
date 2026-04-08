@@ -163,18 +163,18 @@ async function proxyToIntraverse(req, res, path, options = {}) {
       body: options.body,
     });
 
-    const isGamePointPost = path === '/api/v2/game-point/' && method === 'POST';
-    if (isGamePointPost) {
-      const ok = response.status >= 200 && response.status < 300;
-      const bodyStr =
-        typeof response.body === 'object'
-          ? JSON.stringify(response.body)
-          : String(response.body || '').slice(0, 800);
-      console.log(
-        `[intraverse][game-point] Intraverse ${ok ? 'OK' : 'FAILED'} → ${BASE_URL}${path} status=${response.status} body=${bodyStr}`,
-      );
-    }
-    // else {
+    // Verbose proxy logging (enable when debugging Intraverse / other routes):
+    // const isGamePointPost = path === '/api/v2/game-point/' && method === 'POST';
+    // if (isGamePointPost) {
+    //   const ok = response.status >= 200 && response.status < 300;
+    //   const bodyStr =
+    //     typeof response.body === 'object'
+    //       ? JSON.stringify(response.body)
+    //       : String(response.body || '').slice(0, 800);
+    //   console.log(
+    //     `[intraverse][game-point] Intraverse ${ok ? 'OK' : 'FAILED'} → ${BASE_URL}${path} status=${response.status} body=${bodyStr}`,
+    //   );
+    // } else {
     //   console.log(`[intraverse] ${method} ${path}`, response.status, JSON.stringify(response.body, null, 2));
     // }
     res.status(response.status).json({ status: response.status, body: response.body });
@@ -505,10 +505,22 @@ async function computeDifferentialScore(walletAddress, roundId, { kills, deaths,
   await participation.save();
 
   if (expGain > 0) {
-    if (!profile.PlayerProfile) {
-      profile.PlayerProfile = { exp: 0 };
-    }
+    // if (!profile.PlayerProfile) {
+    //   profile.PlayerProfile = { level: 1, exp: 0 };
+    // }
     profile.PlayerProfile.exp = (Number(profile.PlayerProfile.exp) || 0) + expGain;
+
+    if (!profile.PlayerResources) {
+      profile.PlayerResources = {
+        coin: 1000,
+        gem: 0,
+        stamina: 0,
+        medal: 0,
+        tournamentTicket: 0,
+      };
+    }
+    profile.PlayerResources.medal = (Number(profile.PlayerResources.medal) || 0) + expGain;
+
     await profile.save();
   }
 
@@ -571,7 +583,7 @@ router.post('/game-point', async (req, res) => {
   try {
     const result = await computeDifferentialScore(walletAddress, roundId, { kills, deaths, metadata });
     if (!result.ok) {
-      console.warn('[intraverse][game-point] no Intraverse call:', result.reason, { roundId, walletAddress: String(walletAddress).slice(0, 12) + '…' });
+      // console.warn('[intraverse][game-point] no Intraverse call:', result.reason, { roundId, walletAddress: String(walletAddress).slice(0, 12) + '…' });
       if (result.reason === 'NO_PROFILE') {
         return res.status(404).json({ error: 'Player profile not found' });
       }
@@ -589,18 +601,18 @@ router.post('/game-point', async (req, res) => {
       score: Number(result.delta),
       walletAddress,
     };
-    const w = String(walletAddress);
-    const walletLog = w.length > 14 ? `${w.slice(0, 10)}…${w.slice(-4)}` : w;
-    console.log(
-      '[intraverse][game-point] local DB updated; sending to Intraverse',
-      JSON.stringify({
-        roundId,
-        roomId: intraBody.roomId,
-        score: intraBody.score,
-        wallet: walletLog,
-        intraverseBaseUrl: BASE_URL,
-      }),
-    );
+    // const w = String(walletAddress);
+    // const walletLog = w.length > 14 ? `${w.slice(0, 10)}…${w.slice(-4)}` : w;
+    // console.log(
+    //   '[intraverse][game-point] local DB updated; sending to Intraverse',
+    //   JSON.stringify({
+    //     roundId,
+    //     roomId: intraBody.roomId,
+    //     score: intraBody.score,
+    //     wallet: walletLog,
+    //     intraverseBaseUrl: BASE_URL,
+    //   }),
+    // );
 
     await proxyToIntraverse(req, res, '/api/v2/game-point/', {
       method: 'POST',
