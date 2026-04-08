@@ -4,6 +4,10 @@ const crypto = require('crypto');
 // controllers/warzoneController.js
 const jwt = require('jsonwebtoken');
 const PlayerProfile = require('../models/PlayerProfile');
+const {
+  computeTournamentGamePoint,
+  postIntraverseGamePoint,
+} = require('../services/tournamentGamePointService');
 const WarzoneNameWallet = require('../models/nameWallet');
 const NameCounter = require('../models/nameCounter');
 const NonceState = require('../models/NonceState');
@@ -651,17 +655,54 @@ exports.saveProfile = async (req, res) => {
     perf.step('findOne');
     if (!profile) profile = new PlayerProfile({ walletAddress, ...defaultData });
 
-    data.PlayerCampaignProgress = {};
+    const { tournamentGamePoint, ...assignPayload } = data;
 
-    if (data.PlayerCampaignStageProgress == null) {
-      data.PlayerCampaignStageProgress = {};
+    assignPayload.PlayerCampaignProgress = {};
+
+    if (assignPayload.PlayerCampaignStageProgress == null) {
+      assignPayload.PlayerCampaignStageProgress = {};
     }
 
-    Object.assign(profile, data);
+    Object.assign(profile, assignPayload);
     normalizeProfile(profile);
 
     await profile.save();
     perf.step('profile_save');
+
+    /** Optional: coin-delta scoring + Intraverse + medal only (does not change PlayerProfile.exp). */
+    let tournamentScoring;
+    if (tournamentGamePoint && String(tournamentGamePoint.roundId || '').trim()) {
+      const r = await computeTournamentGamePoint(walletAddress, tournamentGamePoint.roundId, {
+        kills: tournamentGamePoint.kills,
+        deaths: tournamentGamePoint.deaths,
+        metadata: tournamentGamePoint.metadata,
+        updateExp: false,
+        updateMedal: true,
+      });
+      tournamentScoring = {
+        ok: r.ok,
+        reason: r.reason,
+        delta: r.delta,
+        medalGain: r.expGain,
+      };
+      if (r.ok) {
+        try {
+          const iv = await postIntraverseGamePoint({
+            roundId: tournamentGamePoint.roundId,
+            walletAddress,
+            roomId: tournamentGamePoint.roomId,
+            score: r.delta,
+          });
+          tournamentScoring.intraverseStatus = iv.status;
+          tournamentScoring.intraverseBody = iv.body;
+        } catch (ivErr) {
+          tournamentScoring.intraverseError = ivErr.message || String(ivErr);
+          console.error('[saveProfile] tournament Intraverse post failed:', ivErr);
+        }
+      }
+      profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
+      perf.step('tournament_game_point');
+    }
 
     runInBackground(
       () => endGameIfActive(walletAddress),
@@ -671,6 +712,9 @@ exports.saveProfile = async (req, res) => {
     perf.step('endGameIfActive_scheduled_async');
 
     const responseProfile = profile.toObject();
+    if (tournamentScoring !== undefined) {
+      responseProfile.tournamentScoring = tournamentScoring;
+    }
     perf.step('prepare_response');
     perf.done({ shouldUpdate: false });
     return res.json(responseProfile);
