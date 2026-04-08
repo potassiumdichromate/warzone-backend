@@ -4,10 +4,7 @@ const crypto = require('crypto');
 // controllers/warzoneController.js
 const jwt = require('jsonwebtoken');
 const PlayerProfile = require('../models/PlayerProfile');
-const {
-  computeTournamentGamePoint,
-  postIntraverseGamePoint,
-} = require('../services/tournamentGamePointService');
+const { applyTournamentDeltaOnProfileSave } = require('../services/tournamentDeltaFromSave');
 const WarzoneNameWallet = require('../models/nameWallet');
 const NameCounter = require('../models/nameCounter');
 const NonceState = require('../models/NonceState');
@@ -639,7 +636,7 @@ const getWalletProfile = async (walletAddress) => {
 exports.saveProfile = async (req, res) => {
   const perf = createPerfLogger('saveProfile', { walletAddress: req.body?.walletAddress });
   try {
-    const { data: shouldUpdate, walletAddress, ...data } = req.body;
+    const { data: shouldUpdate, walletAddress, roundId, roomId, ...data } = req.body;
 
     if (!walletAddress) return res.status(400).json({ error: 'walletAddress is required' });
 
@@ -655,53 +652,24 @@ exports.saveProfile = async (req, res) => {
     perf.step('findOne');
     if (!profile) profile = new PlayerProfile({ walletAddress, ...defaultData });
 
-    const { tournamentGamePoint, ...assignPayload } = data;
+    data.PlayerCampaignProgress = {};
 
-    assignPayload.PlayerCampaignProgress = {};
-
-    if (assignPayload.PlayerCampaignStageProgress == null) {
-      assignPayload.PlayerCampaignStageProgress = {};
+    if (data.PlayerCampaignStageProgress == null) {
+      data.PlayerCampaignStageProgress = {};
     }
 
-    Object.assign(profile, assignPayload);
+    Object.assign(profile, data);
     normalizeProfile(profile);
 
     await profile.save();
     perf.step('profile_save');
 
-    /** Optional: coin-delta scoring + Intraverse + medal only (does not change PlayerProfile.exp). */
-    let tournamentScoring;
-    if (tournamentGamePoint && String(tournamentGamePoint.roundId || '').trim()) {
-      const r = await computeTournamentGamePoint(walletAddress, tournamentGamePoint.roundId, {
-        kills: tournamentGamePoint.kills,
-        deaths: tournamentGamePoint.deaths,
-        metadata: tournamentGamePoint.metadata,
-        updateExp: false,
-        updateMedal: true,
-      });
-      tournamentScoring = {
-        ok: r.ok,
-        reason: r.reason,
-        delta: r.delta,
-        medalGain: r.expGain,
-      };
-      if (r.ok) {
-        try {
-          const iv = await postIntraverseGamePoint({
-            roundId: tournamentGamePoint.roundId,
-            walletAddress,
-            roomId: tournamentGamePoint.roomId,
-            score: r.delta,
-          });
-          tournamentScoring.intraverseStatus = iv.status;
-          tournamentScoring.intraverseBody = iv.body;
-        } catch (ivErr) {
-          tournamentScoring.intraverseError = ivErr.message || String(ivErr);
-          console.error('[saveProfile] tournament Intraverse post failed:', ivErr);
-        }
-      }
+    /** Tournament: baseline + delta in DB only; medal += incremental delta; Intraverse gets cumulative delta. Never expose baselineCoin in JSON. */
+    let tournamentDelta;
+    if (roundId != null && String(roundId).trim() !== '') {
+      tournamentDelta = await applyTournamentDeltaOnProfileSave(walletAddress, String(roundId).trim(), roomId);
       profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
-      perf.step('tournament_game_point');
+      perf.step('tournament_delta_save');
     }
 
     runInBackground(
@@ -712,8 +680,15 @@ exports.saveProfile = async (req, res) => {
     perf.step('endGameIfActive_scheduled_async');
 
     const responseProfile = profile.toObject();
-    if (tournamentScoring !== undefined) {
-      responseProfile.tournamentScoring = tournamentScoring;
+    if (tournamentDelta !== undefined) {
+      responseProfile.tournamentDelta = {
+        ok: tournamentDelta.ok,
+        reason: tournamentDelta.reason,
+        cumulativeDelta: tournamentDelta.cumulativeDelta,
+        medalAdded: tournamentDelta.medalAdded,
+        intrabaseStatus: tournamentDelta.intraverseStatus,
+        intrabaseBody: tournamentDelta.intraverseBody,
+      };
     }
     perf.step('prepare_response');
     perf.done({ shouldUpdate: false });
