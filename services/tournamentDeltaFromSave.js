@@ -9,6 +9,21 @@ const PlayerRoundParticipation = require('../models/PlayerRoundParticipation');
 const BASE_URL = process.env.INTRAVERSE_BASE_URL || 'https://api-stage.intraverse.io';
 const DEFAULT_GAME_SLUG = process.env.INTRAVERSE_GAME_SLUG || 'warzone-warriors';
 
+function shortWallet(w) {
+  const s = String(w || '').trim();
+  if (s.length < 14) return s || '(empty)';
+  return `${s.slice(0, 6)}…${s.slice(-4)}`;
+}
+
+function snippet(value, max = 480) {
+  try {
+    const s = typeof value === 'string' ? value : JSON.stringify(value);
+    return s.length > max ? `${s.slice(0, max)}…` : s;
+  } catch {
+    return String(value).slice(0, max);
+  }
+}
+
 function isRoundIntervalActive(round) {
   if (!round || !Array.isArray(round.intervals) || round.intervals.length === 0) return false;
   const now = Date.now();
@@ -32,6 +47,8 @@ async function resolveActiveRoundIdFromIntraverse(slug = DEFAULT_GAME_SLUG) {
     status = r.status;
     body = r.body;
   } catch (err) {
+    // Optional: log tournament-list failures when debugging round resolution
+    // console.warn('[tournament-intraverse]', { ts: new Date().toISOString(), event: 'resolve_active_round_fetch_error', slug, message: err.message || String(err) });
     return {
       roundId: null,
       reason: 'FETCH_ERROR',
@@ -40,10 +57,12 @@ async function resolveActiveRoundIdFromIntraverse(slug = DEFAULT_GAME_SLUG) {
     };
   }
   if (status !== 200) {
+    // console.warn('[tournament-intraverse]', { ts: new Date().toISOString(), event: 'resolve_active_round_http_error', slug, httpStatus: status, body: snippet(body) });
     return { roundId: null, reason: 'FETCH_FAILED', fetchStatus: status, detail: body };
   }
   const tournaments = body?.data;
   if (!Array.isArray(tournaments)) {
+    // console.warn('[tournament-intraverse]', { ts: new Date().toISOString(), event: 'resolve_active_round_invalid_body', slug, httpStatus: status });
     return { roundId: null, reason: 'INVALID_RESPONSE', fetchStatus: status };
   }
   const running = tournaments.filter((t) => String(t?.status || '').toUpperCase() === 'RUNNING');
@@ -51,6 +70,7 @@ async function resolveActiveRoundIdFromIntraverse(slug = DEFAULT_GAME_SLUG) {
   for (const t of [...running, ...rest]) {
     for (const r of t.rounds || []) {
       if (isRoundIntervalActive(r)) {
+        // console.log('[tournament-intraverse]', { ts: new Date().toISOString(), event: 'active_round_resolved', slug, roundId: String(r.id), tournamentId: t.id != null ? String(t.id) : undefined });
         return {
           roundId: String(r.id),
           tournamentId: t.id != null ? String(t.id) : undefined,
@@ -59,6 +79,7 @@ async function resolveActiveRoundIdFromIntraverse(slug = DEFAULT_GAME_SLUG) {
       }
     }
   }
+  // console.log('[tournament-intraverse]', { ts: new Date().toISOString(), event: 'no_active_round', slug, tournamentCount: tournaments.length });
   return { roundId: null, reason: 'NO_ACTIVE_ROUND', fetchStatus: status };
 }
 
@@ -192,9 +213,33 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
     });
     intrabaseStatus = iv.status;
     intrabaseBody = iv.body;
+    const okHttp = intrabaseStatus >= 200 && intrabaseStatus < 300;
+    const ivPayloadBase = {
+      ts: new Date().toISOString(),
+      wallet: shortWallet(w),
+      roundId: String(roundId),
+      scoreSent: cumulativeDelta,
+      medalAdded,
+      httpStatus: intrabaseStatus,
+      response: snippet(intrabaseBody),
+    };
+    if (okHttp) {
+      console.log('[tournament-intraverse]', { event: 'game_point_ok', ...ivPayloadBase });
+    } else {
+      console.warn('[tournament-intraverse]', { event: 'game_point_http_error', ...ivPayloadBase });
+    }
   } catch (err) {
     intrabaseStatus = 0;
     intrabaseBody = { error: err.message || String(err) };
+    console.warn('[tournament-intraverse]', {
+      ts: new Date().toISOString(),
+      event: 'game_point_request_failed',
+      wallet: shortWallet(w),
+      roundId: String(roundId),
+      scoreSent: cumulativeDelta,
+      medalAdded,
+      message: err.message || String(err),
+    });
   }
 
   return {
