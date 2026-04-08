@@ -156,13 +156,27 @@ async function proxyToIntraverse(req, res, path, options = {}) {
       ...(options.headers || {}),
     };
 
+    const method = String(options.method || 'GET').toUpperCase();
     const response = await fetchJSON(`${BASE_URL}${path}`, {
-      method: options.method || 'GET',
+      method,
       headers,
       body: options.body,
     });
 
-    console.log(`[intraverse] ${options.method || 'GET'} ${path}`, response.status, JSON.stringify(response.body, null, 2));
+    const isGamePointPost = path === '/api/v2/game-point/' && method === 'POST';
+    if (isGamePointPost) {
+      const ok = response.status >= 200 && response.status < 300;
+      const bodyStr =
+        typeof response.body === 'object'
+          ? JSON.stringify(response.body)
+          : String(response.body || '').slice(0, 800);
+      console.log(
+        `[intraverse][game-point] Intraverse ${ok ? 'OK' : 'FAILED'} → ${BASE_URL}${path} status=${response.status} body=${bodyStr}`,
+      );
+    }
+    // else {
+    //   console.log(`[intraverse] ${method} ${path}`, response.status, JSON.stringify(response.body, null, 2));
+    // }
     res.status(response.status).json({ status: response.status, body: response.body });
   } catch (error) {
     console.error(`[intraverse] ${options.method || 'GET'} ${path} failed`, error);
@@ -457,7 +471,7 @@ async function computeDifferentialScore(walletAddress, roundId, { kills, deaths,
 
   const { meta, round } = await findRoundMetaByRoundId(roundId);
   if (!round || !isRoundIntervalActive(round)) {
-    console.log(`[intraverse] game-point rejected: round not active or unknown roundId=${roundId}`);
+    // console.log(`[intraverse] game-point rejected: round not active or unknown roundId=${roundId}`);
     return { ok: false, reason: 'ROUND_NOT_ACTIVE' };
   }
 
@@ -476,7 +490,7 @@ async function computeDifferentialScore(walletAddress, roundId, { kills, deaths,
       roundPoints: 0,
     });
     await participation.save();
-    console.log(`[intraverse] auto-baseline round=${roundId} wallet=${walletAddress} baseline=${currentCoins}`);
+    // console.log(`[intraverse] auto-baseline round=${roundId} wallet=${walletAddress} baseline=${currentCoins}`);
   }
 
   const previousRoundPoints = Number(participation.roundPoints) || 0;
@@ -498,9 +512,9 @@ async function computeDifferentialScore(walletAddress, roundId, { kills, deaths,
     await profile.save();
   }
 
-  console.log(
-    `[intraverse] Differential scoring: Total=${currentCoins}, Baseline=${participation.baselineCoin}, Delta=${delta}, expGain=${expGain}`,
-  );
+  // console.log(
+  //   `[intraverse] Differential scoring: Total=${currentCoins}, Baseline=${participation.baselineCoin}, Delta=${delta}, expGain=${expGain}`,
+  // );
   return { ok: true, delta };
 }
 
@@ -551,11 +565,13 @@ router.get('/rounds/:roundId/participation', async (req, res) => {
 router.post('/game-point', async (req, res) => {
   const { roundId, walletAddress, roomId, kills, deaths, metadata } = req.body;
   if (!roundId || !walletAddress) {
+    // console.warn('[intraverse][game-point] rejected: missing roundId or walletAddress');
     return res.status(400).json({ error: 'roundId and walletAddress are required' });
   }
   try {
     const result = await computeDifferentialScore(walletAddress, roundId, { kills, deaths, metadata });
     if (!result.ok) {
+      console.warn('[intraverse][game-point] no Intraverse call:', result.reason, { roundId, walletAddress: String(walletAddress).slice(0, 12) + '…' });
       if (result.reason === 'NO_PROFILE') {
         return res.status(404).json({ error: 'Player profile not found' });
       }
@@ -566,10 +582,30 @@ router.post('/game-point', async (req, res) => {
       }
       return res.status(500).json({ error: 'Failed to compute score' });
     }
+
+    const intraBody = {
+      roundId,
+      roomId: String(roomId || `warzone-${Date.now()}`).slice(0, 64),
+      score: Number(result.delta),
+      walletAddress,
+    };
+    const w = String(walletAddress);
+    const walletLog = w.length > 14 ? `${w.slice(0, 10)}…${w.slice(-4)}` : w;
+    console.log(
+      '[intraverse][game-point] local DB updated; sending to Intraverse',
+      JSON.stringify({
+        roundId,
+        roomId: intraBody.roomId,
+        score: intraBody.score,
+        wallet: walletLog,
+        intraverseBaseUrl: BASE_URL,
+      }),
+    );
+
     await proxyToIntraverse(req, res, '/api/v2/game-point/', {
       method: 'POST',
       auth: { includeServerKey: true },
-      body: { roundId, roomId: String(roomId || `warzone-${Date.now()}`).slice(0, 64), score: Number(result.delta), walletAddress },
+      body: intraBody,
     });
   } catch (err) {
     console.error('[intraverse] game-point error:', err);
