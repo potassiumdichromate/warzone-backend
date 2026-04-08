@@ -9,7 +9,7 @@ const PlayerRoundParticipation = require('../models/PlayerRoundParticipation');
 const router = express.Router();
 
 const BASE_URL = process.env.INTRAVERSE_BASE_URL || 'https://api-stage.intraverse.io';
-const DEFAULT_GAME_SLUG = process.env.INTRAVERSE_GAME_SLUG || 'kult-games';
+const DEFAULT_GAME_SLUG = process.env.INTRAVERSE_GAME_SLUG || 'warzone-warriors';
 
 function getPlayBaseUrl() {
   if (process.env.INTRAVERSE_PLAY_BASE_URL) {
@@ -435,31 +435,49 @@ router.post('/tournaments/:id/calculate-score', async (req, res) => {
 
 // --- Tournament helpers ---
 
-async function getOrCreateRoundParticipation(walletAddress, roundId, baselineCoin, { kills, deaths, metadata } = {}) {
-  let participation = await PlayerRoundParticipation.findOne({
-    walletAddress: { $regex: new RegExp(`^${walletAddress.trim()}$`, 'i') },
-    roundId,
-  });
-  if (!participation) {
-    participation = new PlayerRoundParticipation({
-      walletAddress, roundId, baselineCoin, roundPoints: 0,
-      kills: kills || 0, deaths: deaths || 0, metadata: metadata || {},
-    });
-    await participation.save();
-    console.log(`[intraverse] Baseline ${baselineCoin} set for ${walletAddress} in round ${roundId}`);
-  }
-  return participation;
+function isRoundIntervalActive(round) {
+  if (!round || !Array.isArray(round.intervals) || round.intervals.length === 0) return false;
+  const now = Date.now();
+  return round.intervals.some((iv) => now >= iv.startDate && now <= iv.endDate);
 }
 
-// Returns the differential score (coins earned this round), or null if profile not found
+async function findRoundMetaByRoundId(roundId) {
+  const meta = await TournamentMetadata.findOne({ 'rounds.id': roundId }).lean();
+  if (!meta || !Array.isArray(meta.rounds)) return { meta: null, round: null };
+  const round = meta.rounds.find((r) => r.id === roundId);
+  return { meta, round: round || null };
+}
+
+// No explicit join: first game-point while the round interval is live creates baseline (delta 0); later points use coin delta vs baseline.
 async function computeDifferentialScore(walletAddress, roundId, { kills, deaths, metadata } = {}) {
   const profile = await PlayerProfile.findOne({
     walletAddress: { $regex: new RegExp(`^${walletAddress.trim()}$`, 'i') },
   });
-  if (!profile) return null;
+  if (!profile) return { ok: false, reason: 'NO_PROFILE' };
+
+  const { meta, round } = await findRoundMetaByRoundId(roundId);
+  if (!round || !isRoundIntervalActive(round)) {
+    console.log(`[intraverse] game-point rejected: round not active or unknown roundId=${roundId}`);
+    return { ok: false, reason: 'ROUND_NOT_ACTIVE' };
+  }
 
   const currentCoins = Number(profile.PlayerResources?.coin) || 0;
-  const participation = await getOrCreateRoundParticipation(walletAddress, roundId, currentCoins, { kills, deaths, metadata });
+  let participation = await PlayerRoundParticipation.findOne({
+    walletAddress: { $regex: new RegExp(`^${walletAddress.trim()}$`, 'i') },
+    roundId,
+  });
+
+  if (!participation) {
+    participation = new PlayerRoundParticipation({
+      walletAddress,
+      roundId,
+      tournamentId: meta.tournamentId,
+      baselineCoin: currentCoins,
+      roundPoints: 0,
+    });
+    await participation.save();
+    console.log(`[intraverse] auto-baseline round=${roundId} wallet=${walletAddress} baseline=${currentCoins}`);
+  }
 
   const previousRoundPoints = Number(participation.roundPoints) || 0;
   const delta = Math.max(0, currentCoins - Number(participation.baselineCoin));
@@ -468,7 +486,7 @@ async function computeDifferentialScore(walletAddress, roundId, { kills, deaths,
   participation.roundPoints = delta;
   if (kills !== undefined) participation.kills = kills;
   if (deaths !== undefined) participation.deaths = deaths;
-  if (metadata) participation.metadata = metadata;
+  if (metadata) participation.metadata = { ...participation.metadata, ...metadata };
   participation.lastUpdated = new Date();
   await participation.save();
 
@@ -483,7 +501,7 @@ async function computeDifferentialScore(walletAddress, roundId, { kills, deaths,
   console.log(
     `[intraverse] Differential scoring: Total=${currentCoins}, Baseline=${participation.baselineCoin}, Delta=${delta}, expGain=${expGain}`,
   );
-  return delta;
+  return { ok: true, delta };
 }
 
 async function upsertTournamentFromIntraverse(t) {
@@ -503,35 +521,30 @@ async function upsertTournamentFromIntraverse(t) {
 
 // --- Routes ---
 
-// Join a round — establishes baseline coins, returns participation record
-router.post('/tournaments/:id/rounds/:roundId/join', async (req, res) => {
-  const { walletAddress } = req.body;
-  if (!walletAddress) return res.status(400).json({ error: 'walletAddress is required' });
+// Current saved coin-delta for this wallet + round (for tournament cards)
+router.get('/rounds/:roundId/participation', async (req, res) => {
+  const walletAddress = req.query.walletAddress;
+  if (!walletAddress || !String(walletAddress).trim()) {
+    return res.status(400).json({ error: 'walletAddress query is required' });
+  }
   try {
-    const profile = await PlayerProfile.findOne({
-      walletAddress: { $regex: new RegExp(`^${walletAddress.trim()}$`, 'i') },
-    });
-    if (!profile) return res.status(404).json({ error: 'Player profile not found' });
-
-    const baselineCoin = Number(profile.PlayerResources?.coin) || 0;
-    let participation = await PlayerRoundParticipation.findOne({
-      walletAddress: { $regex: new RegExp(`^${walletAddress.trim()}$`, 'i') },
+    const p = await PlayerRoundParticipation.findOne({
+      walletAddress: { $regex: new RegExp(`^${String(walletAddress).trim()}$`, 'i') },
       roundId: req.params.roundId,
-    });
-
-    if (!participation) {
-      participation = new PlayerRoundParticipation({
-        walletAddress, roundId: req.params.roundId,
-        tournamentId: req.params.id, baselineCoin, roundPoints: 0,
-      });
-      await participation.save();
-      console.log(`[intraverse] ${walletAddress} joined round ${req.params.roundId} with baseline ${baselineCoin}`);
+    }).lean();
+    if (!p) {
+      return res.json({ success: true, roundPoints: 0, baselineCoin: null, hasParticipation: false });
     }
-
-    res.json({ success: true, joined: true, baselineCoin: participation.baselineCoin, roundPoints: participation.roundPoints });
+    res.json({
+      success: true,
+      roundPoints: Number(p.roundPoints) || 0,
+      baselineCoin: p.baselineCoin,
+      hasParticipation: true,
+      lastUpdated: p.lastUpdated,
+    });
   } catch (err) {
-    console.error('[intraverse] join error:', err);
-    res.status(500).json({ error: 'Failed to join round' });
+    console.error('[intraverse] participation lookup error:', err);
+    res.status(500).json({ error: 'Failed to load participation' });
   }
 });
 
@@ -541,12 +554,22 @@ router.post('/game-point', async (req, res) => {
     return res.status(400).json({ error: 'roundId and walletAddress are required' });
   }
   try {
-    const delta = await computeDifferentialScore(walletAddress, roundId, { kills, deaths, metadata });
-    if (delta === null) return res.status(404).json({ error: 'Player profile not found' });
+    const result = await computeDifferentialScore(walletAddress, roundId, { kills, deaths, metadata });
+    if (!result.ok) {
+      if (result.reason === 'NO_PROFILE') {
+        return res.status(404).json({ error: 'Player profile not found' });
+      }
+      if (result.reason === 'ROUND_NOT_ACTIVE') {
+        return res.status(400).json({
+          error: 'This round is not in an active play window, or schedule is not synced yet. Scores are only recorded during the live window.',
+        });
+      }
+      return res.status(500).json({ error: 'Failed to compute score' });
+    }
     await proxyToIntraverse(req, res, '/api/v2/game-point/', {
       method: 'POST',
       auth: { includeServerKey: true },
-      body: { roundId, roomId: String(roomId || `warzone-${Date.now()}`).slice(0, 64), score: Number(delta), walletAddress },
+      body: { roundId, roomId: String(roomId || `warzone-${Date.now()}`).slice(0, 64), score: Number(result.delta), walletAddress },
     });
   } catch (err) {
     console.error('[intraverse] game-point error:', err);
