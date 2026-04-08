@@ -1,6 +1,7 @@
 /**
- * Tournament coin delta for saveProfile: stores baseline per (wallet, round) in PlayerRoundParticipation.
- * baselineCoin is never exposed in API responses from profileController.
+ * Tournament sync on saveProfile: baselineCoin is the last saved coin snapshot per round.
+ * Each save sends (coins - baselineCoin) to medals + Intraverse, then sets baselineCoin = coins.
+ * Repeating the same save yields delta 0. baselineCoin is not exposed in profile API responses.
  */
 const https = require('https');
 const PlayerProfile = require('../models/PlayerProfile');
@@ -149,8 +150,9 @@ async function postIntraverseGamePoint({ roundId, walletAddress, roomId, score }
 }
 
 /**
- * After profile is saved with updated coins: establish baseline or compute delta, update medal increment, forward cumulative delta to Intraverse.
- * Does not return baselineCoin to callers.
+ * After profile save: delta = max(0, coins - baselineCoin), then baselineCoin := coins.
+ * Medals += delta; Intraverse game-point gets `score: delta` (increment since last save).
+ * cumulativeDelta in the return value is roundPoints total (sum of deltas) for API compatibility.
  */
 async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId) {
   const profile = await PlayerProfile.findOne(walletAddressRegexQuery(walletAddress));
@@ -166,8 +168,9 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
     roundId: String(roundId),
   });
 
-  let cumulativeDelta = 0;
-  let medalAdded = 0;
+  let delta = 0;
+  let baselineBefore = coins;
+  let roundPointsTotal = 0;
 
   if (!participation) {
     participation = new PlayerRoundParticipation({
@@ -177,17 +180,18 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
       roundPoints: 0,
     });
     await participation.save();
-    cumulativeDelta = 0;
-    medalAdded = 0;
+    delta = 0;
+    roundPointsTotal = 0;
   } else {
-    cumulativeDelta = Math.max(0, coins - (Number(participation.baselineCoin) || 0));
-    const previous = Number(participation.roundPoints) || 0;
-    medalAdded = Math.max(0, cumulativeDelta - previous);
-    participation.roundPoints = cumulativeDelta;
+    baselineBefore = Number(participation.baselineCoin) || 0;
+    delta = Math.max(0, coins - baselineBefore);
+    participation.baselineCoin = coins;
+    participation.roundPoints = (Number(participation.roundPoints) || 0) + delta;
     participation.lastUpdated = new Date();
     await participation.save();
+    roundPointsTotal = Number(participation.roundPoints) || 0;
 
-    if (medalAdded > 0) {
+    if (delta > 0) {
       if (!profile.PlayerResources) {
         profile.PlayerResources = {
           coin: 1000,
@@ -197,7 +201,7 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
           tournamentTicket: 0,
         };
       }
-      profile.PlayerResources.medal = (Number(profile.PlayerResources.medal) || 0) + medalAdded;
+      profile.PlayerResources.medal = (Number(profile.PlayerResources.medal) || 0) + delta;
       await profile.save();
     }
   }
@@ -205,11 +209,12 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
   let intrabaseStatus;
   let intrabaseBody;
   try {
+    /** Intraverse `score` is incremental this save; confirm their API sums increments if they expose a cumulative leaderboard. */
     const iv = await postIntraverseGamePoint({
       roundId: String(roundId),
       walletAddress: w,
       roomId,
-      score: cumulativeDelta,
+      score: delta,
     });
     intrabaseStatus = iv.status;
     intrabaseBody = iv.body;
@@ -217,14 +222,14 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
     const ivPayloadBase = {
       ts: new Date().toISOString(),
       event: okHttp ? 'game_point_ok' : 'game_point_http_error',
-      /** Intraverse only accepts `score` (tournament points). It does not mirror PlayerResources.coin. */
       what: 'intraverse_tournament_score_sync',
       wallet: shortWallet(w),
       roundId: String(roundId),
       profileCoin: coins,
-      roundBaselineCoin: Number(participation.baselineCoin) || 0,
-      scoreSent: cumulativeDelta,
-      medalAdded,
+      baselineBeforeSnapshot: baselineBefore,
+      deltaSent: delta,
+      roundPointsTotal,
+      medalAdded: delta,
       httpStatus: intrabaseStatus,
       response: snippet(intrabaseBody),
     };
@@ -243,9 +248,10 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
       wallet: shortWallet(w),
       roundId: String(roundId),
       profileCoin: coins,
-      roundBaselineCoin: Number(participation.baselineCoin) || 0,
-      scoreSent: cumulativeDelta,
-      medalAdded,
+      baselineBeforeSnapshot: baselineBefore,
+      deltaSent: delta,
+      roundPointsTotal,
+      medalAdded: delta,
       message: err.message || String(err),
     });
   }
@@ -253,8 +259,9 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
   return {
     ok: true,
     roundId: String(roundId),
-    cumulativeDelta,
-    medalAdded,
+    delta,
+    medalAdded: delta,
+    cumulativeDelta: roundPointsTotal,
     intrabaseStatus,
     intrabaseBody,
   };

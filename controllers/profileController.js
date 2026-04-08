@@ -667,7 +667,7 @@ exports.saveProfile = async (req, res) => {
     await profile.save();
     perf.step('profile_save');
 
-    /** Tournament: baseline + delta in DB only; medal += incremental delta; Intraverse gets cumulative delta. Never expose baselineCoin in JSON. */
+    /** Tournament: snapshot baseline per round; medal += (coins − baseline); Intraverse gets that delta; baseline := coins. Never expose baselineCoin in JSON. */
     let tournamentDelta;
     const clientRoundId =
       roundId != null && String(roundId).trim() !== '' ? String(roundId).trim() : null;
@@ -718,6 +718,7 @@ exports.saveProfile = async (req, res) => {
         resolvedFromIntraverse: tournamentDelta.resolvedFromIntraverse,
         fetchStatus: tournamentDelta.fetchStatus,
         detail: tournamentDelta.detail,
+        delta: tournamentDelta.delta,
         cumulativeDelta: tournamentDelta.cumulativeDelta,
         medalAdded: tournamentDelta.medalAdded,
         intrabaseStatus: tournamentDelta.intrabaseStatus,

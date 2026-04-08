@@ -6,10 +6,10 @@ const PlayerRoundParticipationSchema = new Schema({
   roundId: { type: String, required: true, index: true },
   tournamentId: { type: String },
 
-  // The coins the player had when they first started this round
+  // Last saved profile coin snapshot for this round (advanced on each saveProfile tournament sync)
   baselineCoin: { type: Number, default: 0 },
 
-  // The points accumulated DURING this round (delta)
+  // Sum of positive coin deltas since first touch of this round (for local leaderboard)
   roundPoints: { type: Number, default: 0 },
 
   // Extra stats per round
