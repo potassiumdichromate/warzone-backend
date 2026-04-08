@@ -4,7 +4,10 @@ const crypto = require('crypto');
 // controllers/warzoneController.js
 const jwt = require('jsonwebtoken');
 const PlayerProfile = require('../models/PlayerProfile');
-const { applyTournamentDeltaOnProfileSave } = require('../services/tournamentDeltaFromSave');
+const {
+  applyTournamentDeltaOnProfileSave,
+  resolveActiveRoundIdFromIntraverse,
+} = require('../services/tournamentDeltaFromSave');
 const WarzoneNameWallet = require('../models/nameWallet');
 const NameCounter = require('../models/nameCounter');
 const NonceState = require('../models/NonceState');
@@ -666,10 +669,36 @@ exports.saveProfile = async (req, res) => {
 
     /** Tournament: baseline + delta in DB only; medal += incremental delta; Intraverse gets cumulative delta. Never expose baselineCoin in JSON. */
     let tournamentDelta;
-    if (roundId != null && String(roundId).trim() !== '') {
-      tournamentDelta = await applyTournamentDeltaOnProfileSave(walletAddress, String(roundId).trim(), roomId);
+    const clientRoundId =
+      roundId != null && String(roundId).trim() !== '' ? String(roundId).trim() : null;
+    let effectiveRoundId = clientRoundId;
+    let roundResolve;
+    if (!effectiveRoundId) {
+      roundResolve = await resolveActiveRoundIdFromIntraverse();
+      effectiveRoundId = roundResolve.roundId || null;
+      perf.step('tournament_resolve_active_round');
+    }
+    if (effectiveRoundId) {
+      tournamentDelta = await applyTournamentDeltaOnProfileSave(
+        walletAddress,
+        effectiveRoundId,
+        roomId,
+      );
+      if (tournamentDelta.ok && !clientRoundId && roundResolve) {
+        tournamentDelta.resolvedFromIntraverse = true;
+        if (roundResolve.tournamentId) tournamentDelta.tournamentId = roundResolve.tournamentId;
+      }
       profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
       perf.step('tournament_delta_save');
+    } else if (!clientRoundId && roundResolve) {
+      tournamentDelta = {
+        ok: false,
+        reason: roundResolve.reason || 'NO_ACTIVE_ROUND',
+        roundId: null,
+        resolvedFromIntraverse: true,
+        fetchStatus: roundResolve.fetchStatus,
+        detail: roundResolve.detail,
+      };
     }
 
     runInBackground(
@@ -684,10 +713,15 @@ exports.saveProfile = async (req, res) => {
       responseProfile.tournamentDelta = {
         ok: tournamentDelta.ok,
         reason: tournamentDelta.reason,
+        roundId: tournamentDelta.roundId,
+        tournamentId: tournamentDelta.tournamentId,
+        resolvedFromIntraverse: tournamentDelta.resolvedFromIntraverse,
+        fetchStatus: tournamentDelta.fetchStatus,
+        detail: tournamentDelta.detail,
         cumulativeDelta: tournamentDelta.cumulativeDelta,
         medalAdded: tournamentDelta.medalAdded,
-        intrabaseStatus: tournamentDelta.intraverseStatus,
-        intrabaseBody: tournamentDelta.intraverseBody,
+        intrabaseStatus: tournamentDelta.intrabaseStatus,
+        intrabaseBody: tournamentDelta.intrabaseBody,
       };
     }
     perf.step('prepare_response');

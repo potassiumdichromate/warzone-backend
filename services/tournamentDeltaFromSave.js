@@ -7,6 +7,60 @@ const PlayerProfile = require('../models/PlayerProfile');
 const PlayerRoundParticipation = require('../models/PlayerRoundParticipation');
 
 const BASE_URL = process.env.INTRAVERSE_BASE_URL || 'https://api-stage.intraverse.io';
+const DEFAULT_GAME_SLUG = process.env.INTRAVERSE_GAME_SLUG || 'warzone-warriors';
+
+function isRoundIntervalActive(round) {
+  if (!round || !Array.isArray(round.intervals) || round.intervals.length === 0) return false;
+  const now = Date.now();
+  return round.intervals.some((iv) => now >= iv.startDate && now <= iv.endDate);
+}
+
+/**
+ * GET /api/v2/tournament/game/:slug — same source as intraverseTestRoutes sync-tournaments.
+ * Returns the first round id whose interval contains now (RUNNING tournaments first).
+ */
+async function resolveActiveRoundIdFromIntraverse(slug = DEFAULT_GAME_SLUG) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (process.env.INTRAVERSE_SERVER_KEY) {
+    headers['x-game-server-key'] = process.env.INTRAVERSE_SERVER_KEY;
+  }
+  const url = `${BASE_URL}/api/v2/tournament/game/${encodeURIComponent(slug)}?size=30`;
+  let status;
+  let body;
+  try {
+    const r = await fetchJSON(url, { method: 'GET', headers });
+    status = r.status;
+    body = r.body;
+  } catch (err) {
+    return {
+      roundId: null,
+      reason: 'FETCH_ERROR',
+      fetchStatus: 0,
+      detail: err.message || String(err),
+    };
+  }
+  if (status !== 200) {
+    return { roundId: null, reason: 'FETCH_FAILED', fetchStatus: status, detail: body };
+  }
+  const tournaments = body?.data;
+  if (!Array.isArray(tournaments)) {
+    return { roundId: null, reason: 'INVALID_RESPONSE', fetchStatus: status };
+  }
+  const running = tournaments.filter((t) => String(t?.status || '').toUpperCase() === 'RUNNING');
+  const rest = tournaments.filter((t) => String(t?.status || '').toUpperCase() !== 'RUNNING');
+  for (const t of [...running, ...rest]) {
+    for (const r of t.rounds || []) {
+      if (isRoundIntervalActive(r)) {
+        return {
+          roundId: String(r.id),
+          tournamentId: t.id != null ? String(t.id) : undefined,
+          fetchStatus: status,
+        };
+      }
+    }
+  }
+  return { roundId: null, reason: 'NO_ACTIVE_ROUND', fetchStatus: status };
+}
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -145,6 +199,7 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
 
   return {
     ok: true,
+    roundId: String(roundId),
     cumulativeDelta,
     medalAdded,
     intrabaseStatus,
@@ -155,4 +210,5 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
 module.exports = {
   applyTournamentDeltaOnProfileSave,
   postIntraverseGamePoint,
+  resolveActiveRoundIdFromIntraverse,
 };
