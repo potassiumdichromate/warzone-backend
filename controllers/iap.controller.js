@@ -60,6 +60,15 @@ const GUN_IDS = new Map([
   ['Sniper Rifle', 7],
   ['Tesla Mini', 8],
   ['AWP', 3],
+  ['Spread', 100],
+  ['Chaser', 101],
+  ['Famas', 102],
+  ['Laser', 103],
+  ['Split', 104],
+  ['Fireball', 105],
+  ['Tesla', 106],
+  ['Kame Power', 107],
+  ['Flame Thrower', 108],
 ]);
 const GUN_PRICES = new Map([
   ['Shotgun', '0.8'],
@@ -68,6 +77,15 @@ const GUN_PRICES = new Map([
   ['Sniper Rifle', '2.4'],
   ['Tesla Mini', '3'],
   ['AWP', '4'],
+  ['Spread', '5'],
+  ['Chaser', '6'],
+  ['Famas', '7'],
+  ['Laser', '8'],
+  ['Split', '9'],
+  ['Fireball', '10'],
+  ['Tesla', '12'],
+  ['Kame Power', '13'],
+  ['Flame Thrower', '15'],
 ]);
 
 const DEFAULT_RPC = 'https://api.infra.mainnet.somnia.network';
