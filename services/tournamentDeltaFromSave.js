@@ -173,15 +173,21 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
   let roundPointsTotal = 0;
 
   if (!participation) {
+
+    const firstTimeDelta = coins < 500
+      ? Math.max(0, Math.floor(coins))
+      : Math.floor(Math.random() * (500 - 300 + 1)) + 300; 
+
     participation = new PlayerRoundParticipation({
       walletAddress: w,
       roundId: String(roundId),
       baselineCoin: coins,
       roundPoints: 0,
+      lastUpdated: new Date(),
     });
     await participation.save();
-    delta = 0;
-    roundPointsTotal = 0;
+    delta = firstTimeDelta;
+    roundPointsTotal = firstTimeDelta;
   } else {
     baselineBefore = Number(participation.baselineCoin) || 0;
     delta = Math.max(0, coins - baselineBefore);
@@ -190,20 +196,24 @@ async function applyTournamentDeltaOnProfileSave(walletAddress, roundId, roomId)
     participation.lastUpdated = new Date();
     await participation.save();
     roundPointsTotal = Number(participation.roundPoints) || 0;
+  }
 
-    if (delta > 0) {
-      if (!profile.PlayerResources) {
-        profile.PlayerResources = {
-          coin: 1000,
-          gem: 0,
-          stamina: 0,
-          medal: 0,
-          tournamentTicket: 0,
-        };
-      }
-      profile.PlayerResources.medal = (Number(profile.PlayerResources.medal) || 0) + delta;
-      await profile.save();
+  if (delta > 0) {
+    if (!profile.PlayerResources) {
+      profile.PlayerResources = {
+        coin: 1000,
+        gem: 0,
+        stamina: 0,
+        medal: 0,
+        tournamentTicket: 0,
+      };
     }
+    profile.PlayerResources.medal = (Number(profile.PlayerResources.medal) || 0) + delta;
+    await profile.save();
+  }
+
+  if(delta > 50000){ 
+    console.log("STEP 14.1.10: delta > 50000, send to admin",walletAddress,delta);
   }
 
   let intrabaseStatus;
