@@ -668,63 +668,65 @@ exports.saveProfile = async (req, res) => {
     perf.step('profile_save');
 
     /** Tournament: snapshot baseline per round; medal += (coins − baseline); Intraverse gets that delta; baseline := coins. Never expose baselineCoin in JSON. */
-    let tournamentDelta;
-    const clientRoundId =
-      roundId != null && String(roundId).trim() !== '' ? String(roundId).trim() : null;
-    let effectiveRoundId = clientRoundId;
-    let roundResolve;
-    if (!effectiveRoundId) {
-      roundResolve = await resolveActiveRoundIdFromIntraverse();
-      effectiveRoundId = roundResolve.roundId || null;
-      perf.step('tournament_resolve_active_round');
-    }
-    if (effectiveRoundId) {
-      tournamentDelta = await applyTournamentDeltaOnProfileSave(
-        walletAddress,
-        effectiveRoundId,
-        roomId,
-      );
-      if (tournamentDelta.ok && !clientRoundId && roundResolve) {
-        tournamentDelta.resolvedFromIntraverse = true;
-        if (roundResolve.tournamentId) tournamentDelta.tournamentId = roundResolve.tournamentId;
-      }
-      profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
-      perf.step('tournament_delta_save');
-    } else if (!clientRoundId && roundResolve) {
-      tournamentDelta = {
-        ok: false,
-        reason: roundResolve.reason || 'NO_ACTIVE_ROUND',
-        roundId: null,
-        resolvedFromIntraverse: true,
-        fetchStatus: roundResolve.fetchStatus,
-        detail: roundResolve.detail,
-      };
-    }
+    // let tournamentDelta;
+    // const clientRoundId =
+    //   roundId != null && String(roundId).trim() !== '' ? String(roundId).trim() : null;
+    // let effectiveRoundId = clientRoundId;
+    // let roundResolve;
+    // if (!effectiveRoundId) {
+    //   roundResolve = await resolveActiveRoundIdFromIntraverse();
+    //   effectiveRoundId = roundResolve.roundId || null;
+    //   perf.step('tournament_resolve_active_round');
+    // }
+    // if (effectiveRoundId) {
+    //   // Intraverse points update happens here: compute this save's tournament delta and push it to Intraverse for the active round.
+    //   tournamentDelta = await applyTournamentDeltaOnProfileSave(
+    //     walletAddress,
+    //     effectiveRoundId,
+    //     roomId,
+    //   );
+    //   if (tournamentDelta.ok && !clientRoundId && roundResolve) {
+    //     tournamentDelta.resolvedFromIntraverse = true;
+    //     if (roundResolve.tournamentId) tournamentDelta.tournamentId = roundResolve.tournamentId;
+    //   }
+    //   profile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
+    //   perf.step('tournament_delta_save');
+    // } else if (!clientRoundId && roundResolve) {
+    //   tournamentDelta = {
+    //     ok: false,
+    //     reason: roundResolve.reason || 'NO_ACTIVE_ROUND',
+    //     roundId: null,
+    //     resolvedFromIntraverse: true,
+    //     fetchStatus: roundResolve.fetchStatus,
+    //     detail: roundResolve.detail,
+    //   };
+    // }
 
-    runInBackground(
-      () => endGameIfActive(walletAddress),
-      'saveProfile.endGameIfActive',
-      { walletAddress },
-    );
-    perf.step('endGameIfActive_scheduled_async');
+    // runInBackground(
+    //   () => endGameIfActive(walletAddress),
+    //   'saveProfile.endGameIfActive',
+    //   { walletAddress },
+    // );
+    // perf.step('endGameIfActive_scheduled_async');
 
+    // const responseProfile = profile.toObject();
+    // if (tournamentDelta !== undefined) {
+    //   responseProfile.tournamentDelta = {
+    //     ok: tournamentDelta.ok,
+    //     reason: tournamentDelta.reason,
+    //     roundId: tournamentDelta.roundId,
+    //     tournamentId: tournamentDelta.tournamentId,
+    //     resolvedFromIntraverse: tournamentDelta.resolvedFromIntraverse,
+    //     fetchStatus: tournamentDelta.fetchStatus,
+    //     detail: tournamentDelta.detail,
+    //     delta: tournamentDelta.delta,
+    //     cumulativeDelta: tournamentDelta.cumulativeDelta,
+    //     medalAdded: tournamentDelta.medalAdded,
+    //     intrabaseStatus: tournamentDelta.intrabaseStatus,
+    //     intrabaseBody: tournamentDelta.intrabaseBody,
+    //   };
+    // }
     const responseProfile = profile.toObject();
-    if (tournamentDelta !== undefined) {
-      responseProfile.tournamentDelta = {
-        ok: tournamentDelta.ok,
-        reason: tournamentDelta.reason,
-        roundId: tournamentDelta.roundId,
-        tournamentId: tournamentDelta.tournamentId,
-        resolvedFromIntraverse: tournamentDelta.resolvedFromIntraverse,
-        fetchStatus: tournamentDelta.fetchStatus,
-        detail: tournamentDelta.detail,
-        delta: tournamentDelta.delta,
-        cumulativeDelta: tournamentDelta.cumulativeDelta,
-        medalAdded: tournamentDelta.medalAdded,
-        intrabaseStatus: tournamentDelta.intrabaseStatus,
-        intrabaseBody: tournamentDelta.intrabaseBody,
-      };
-    }
     perf.step('prepare_response');
     perf.done({ shouldUpdate: false });
     return res.json(responseProfile);
