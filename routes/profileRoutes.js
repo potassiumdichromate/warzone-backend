@@ -7,6 +7,7 @@ const verifyUser = require('../routes/middleware/verifyUser');
 
 const iapController = require('../controllers/iap.controller');
 const trashTalkController = require('../controllers/trashTalkController');
+const internalMarketplaceController = require('../controllers/internalMarketplaceController');
 
 
 router.get('/', getProfile);
@@ -37,6 +38,9 @@ router.get('/iap/purchase-status', verifyUser, iapController.getPurchaseStatus);
 // Legacy alias for FE compatibility
 router.post('/api/v1/player/iap/purchase', verifyUser, iapController.purchase);
 router.get('/api/v1/player/iap/purchase-status', verifyUser, iapController.getPurchaseStatus);
+
+// Internal marketplace sync endpoint (server-to-server; token protected)
+router.post('/internal/marketplace-sync', internalMarketplaceController.syncMarketplacePurchase);
 
 // Optional: expose pricing for Coins/Gems so FE can render store
 router.get('/iap/pricing', (req, res) => {
