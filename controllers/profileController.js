@@ -12,6 +12,7 @@ const WarzoneNameWallet = require('../models/nameWallet');
 const NameCounter = require('../models/nameCounter');
 const NonceState = require('../models/NonceState');
 const { request } = require('http');
+const { queueLamborghiniRewardCheck } = require('../services/highwayHustleRewardService');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
@@ -666,6 +667,7 @@ exports.saveProfile = async (req, res) => {
 
     await profile.save();
     perf.step('profile_save');
+    queueLamborghiniRewardCheck(profile, 'saveProfile');
 
     /** Tournament: snapshot baseline per round; medal += (coins − baseline); Intraverse gets that delta; baseline := coins. Never expose baselineCoin in JSON. */
     // let tournamentDelta;

@@ -1,4 +1,5 @@
 const PlayerProfile = require('../models/PlayerProfile');
+const { queueLamborghiniRewardCheck } = require('../services/highwayHustleRewardService');
 
 function normalizeWalletAddress(walletAddress) {
   return String(walletAddress || '').trim().toLowerCase();
@@ -102,6 +103,7 @@ exports.syncMarketplacePurchase = async (req, res) => {
     };
 
     await profile.save();
+    queueLamborghiniRewardCheck(profile, 'internalMarketplaceSync');
 
     return res.json({
       ok: true,

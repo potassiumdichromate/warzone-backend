@@ -2,6 +2,7 @@ const { ethers } = require('ethers');
 const fs = require('fs');
 const path = require('path');
 const PlayerProfile = require('../models/PlayerProfile');
+const { queueLamborghiniRewardCheck } = require('../services/highwayHustleRewardService');
 const IAPPurchase = require('../models/IAPPurchase');
 
 function loadContractAbi() {
@@ -365,7 +366,10 @@ async function verifyAndDeliverPurchase(purchaseId) {
     }
   }
 
-  if (changed) await player.save();
+  if (changed) {
+    await player.save();
+    queueLamborghiniRewardCheck(player, 'iapPurchase');
+  }
 
   const finalMeta = { ...(purchase.metadata || {}) };
   finalMeta.status = PURCHASE_STATUS.COMPLETED;

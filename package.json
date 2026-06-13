@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "configure:iap": "node scripts/configureIAP.js"
+    "configure:iap": "node scripts/configureIAP.js",
+    "sync:highway-rewards": "node scripts/syncHighwayHustleRewards.js",
+    "test": "node --test"
   },
   "keywords": [
     "web3",
