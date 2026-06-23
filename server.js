@@ -6,6 +6,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 const profileRoutes = require('./routes/profileRoutes');
 const intraverseTestRoutes = require('./routes/intraverseTestRoutes');
+const kultPointsRoutes = require('./routes/kultPointsRoutes');
 const app = express();
 const SLOW_REQUEST_MS = Number(process.env.SLOW_REQUEST_MS || 2000);
 const SLOW_MONGO_MS = Number(process.env.SLOW_MONGO_MS || 200);
@@ -100,6 +101,7 @@ app.use((req, res, next) => {
 });
 
 app.use('/warzone/intraverse', intraverseTestRoutes);
+app.use('/warzone/kult-points', kultPointsRoutes);
 app.use('/warzone', profileRoutes);
 
 
