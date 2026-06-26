@@ -8,6 +8,7 @@ const verifyUser = require('../routes/middleware/verifyUser');
 const iapController = require('../controllers/iap.controller');
 const trashTalkController = require('../controllers/trashTalkController');
 const internalMarketplaceController = require('../controllers/internalMarketplaceController');
+const crossGameRewardController = require('../controllers/crossGameRewardController');
 
 
 router.get('/', getProfile);
@@ -41,6 +42,7 @@ router.get('/api/v1/player/iap/purchase-status', verifyUser, iapController.getPu
 
 // Internal marketplace sync endpoint (server-to-server; token protected)
 router.post('/internal/marketplace-sync', internalMarketplaceController.syncMarketplacePurchase);
+router.post('/internal/cross-game/gun-reward', crossGameRewardController.grantGunReward);
 
 // Optional: expose pricing for Coins/Gems so FE can render store
 router.get('/iap/pricing', (req, res) => {
