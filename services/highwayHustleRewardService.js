@@ -1,6 +1,7 @@
 const HIGHWAY_HUSTLE_REWARD_ID = 'lamborghini';
 const DEFAULT_COIN_THRESHOLD = 3000;
 const DEFAULT_TIMEOUT_MS = 5000;
+const DEFAULT_REWARD_GRANT_SECRET = 'warzone-highway-lamborghini-cross-game-v1';
 
 function normalizeWalletAddress(value) {
   return String(value || '').trim().toLowerCase();
@@ -13,7 +14,7 @@ function getConfig() {
 
   return {
     baseUrl,
-    grantSecret: String(process.env.HIGHWAY_HUSTLE_REWARD_GRANT_SECRET || '').trim(),
+    grantSecret: String(process.env.HIGHWAY_HUSTLE_REWARD_GRANT_SECRET || DEFAULT_REWARD_GRANT_SECRET).trim(),
     threshold: Number(process.env.HIGHWAY_HUSTLE_LAMBORGHINI_COIN_THRESHOLD || DEFAULT_COIN_THRESHOLD),
     timeoutMs: Number(process.env.HIGHWAY_HUSTLE_REWARD_TIMEOUT_MS || DEFAULT_TIMEOUT_MS),
   };
@@ -26,10 +27,6 @@ async function grantLamborghiniIfEligible(player) {
 
   if (!walletAddress || !Number.isFinite(coinBalance) || coinBalance < config.threshold) {
     return { eligible: false, granted: false, walletAddress, coinBalance };
-  }
-
-  if (!config.grantSecret) {
-    throw new Error('HIGHWAY_HUSTLE_REWARD_GRANT_SECRET is not configured');
   }
 
   const controller = new AbortController();

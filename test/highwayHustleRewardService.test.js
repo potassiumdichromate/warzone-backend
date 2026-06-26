@@ -7,6 +7,13 @@ const {
 
 const walletAddress = '0x1234567890123456789012345678901234567890';
 
+test.afterEach(() => {
+  delete process.env.HIGHWAY_HUSTLE_REWARD_GRANT_SECRET;
+  delete process.env.HIGHWAY_HUSTLE_API_URL;
+  delete process.env.HIGHWAY_HUSTLE_LAMBORGHINI_COIN_THRESHOLD;
+  global.fetch = undefined;
+});
+
 test('does not call Highway Hustle below the configured coin threshold', async () => {
   let calls = 0;
   global.fetch = async () => {
@@ -50,4 +57,29 @@ test('grants the Lamborghini using the shared server secret at 3000 coins', asyn
     rewardType: 'vehicle',
     note: 'Unlocked by reaching 3000 coins in Warzone Warriors',
   });
+});
+
+test('uses built-in fallback secret when env secret is not configured', async () => {
+  process.env.HIGHWAY_HUSTLE_API_URL = 'https://highway.example/api';
+
+  let request;
+  global.fetch = async (url, options) => {
+    request = { url, options };
+    return {
+      ok: true,
+      status: 201,
+      json: async () => ({ success: true, created: true }),
+    };
+  };
+
+  const result = await grantLamborghiniIfEligible({
+    walletAddress,
+    PlayerResources: { coin: 3000 },
+  });
+
+  assert.equal(result.granted, true);
+  assert.equal(
+    request.options.headers['x-contest-grant-secret'],
+    'warzone-highway-lamborghini-cross-game-v1',
+  );
 });

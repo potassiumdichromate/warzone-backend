@@ -6,9 +6,6 @@ const { grantLamborghiniIfEligible } = require('../services/highwayHustleRewardS
 async function main() {
   const threshold = Number(process.env.HIGHWAY_HUSTLE_LAMBORGHINI_COIN_THRESHOLD || 3000);
   if (!process.env.MONGO_URI) throw new Error('MONGO_URI is required');
-  if (!process.env.HIGHWAY_HUSTLE_REWARD_GRANT_SECRET) {
-    throw new Error('HIGHWAY_HUSTLE_REWARD_GRANT_SECRET is required');
-  }
 
   await mongoose.connect(process.env.MONGO_URI, {
     dbName: process.env.MONGO_DB_NAME || 'new-warzone',
