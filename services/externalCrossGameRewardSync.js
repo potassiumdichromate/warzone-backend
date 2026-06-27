@@ -1,7 +1,7 @@
 const { grantWarzoneGunReward } = require('./crossGameGunRewardService');
 
 const EXTERNAL_ENDPOINTS = Object.freeze({
-  zeroDashLeaderboard: 'https://zerodashbackend.onrender.com/player/leaderboard',
+  zeroDashLeaderboard: 'https://zerog-zerodash.onrender.com/player/leaderboard',
   zeroGpoolLocal: 'https://zerogpoolgame.onrender.com/api/cross-game/local',
   highwayHustleLocal: 'https://highway-hustle-backend.onrender.com/api/cross-game/local',
 });
