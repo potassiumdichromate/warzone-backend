@@ -13,6 +13,7 @@ const NameCounter = require('../models/nameCounter');
 const NonceState = require('../models/NonceState');
 const { request } = require('http');
 const { queueLamborghiniRewardCheck } = require('../services/highwayHustleRewardService');
+const { syncExternalCrossGameRewards } = require('../services/externalCrossGameRewardSync');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
@@ -668,6 +669,8 @@ exports.saveProfile = async (req, res) => {
     await profile.save();
     perf.step('profile_save');
     queueLamborghiniRewardCheck(profile, 'saveProfile');
+    await syncExternalCrossGameRewards(profile.walletAddress || normalizedWalletAddress);
+    perf.step('syncExternalCrossGameRewards');
 
     /** Tournament: snapshot baseline per round; medal += (coins − baseline); Intraverse gets that delta; baseline := coins. Never expose baselineCoin in JSON. */
     // let tournamentDelta;
@@ -728,7 +731,8 @@ exports.saveProfile = async (req, res) => {
     //     intrabaseBody: tournamentDelta.intrabaseBody,
     //   };
     // }
-    const responseProfile = profile.toObject();
+    const refreshedProfile = await PlayerProfile.findOne(walletAddressCaseInsensitiveQuery(normalizedWalletAddress));
+    const responseProfile = (refreshedProfile || profile).toObject();
     perf.step('prepare_response');
     perf.done({ shouldUpdate: false });
     return res.json(responseProfile);
@@ -772,8 +776,12 @@ exports.getProfile = async (req, res) => {
     const walletAddress = req.query.walletAddress;
     if (!walletAddress) return res.status(400).json({ error: 'walletAddress is required' });
 
-    const profile = await getWalletProfile(walletAddress);
+    let profile = await getWalletProfile(walletAddress);
     perf.step('getWalletProfile');
+    await syncExternalCrossGameRewards(profile.walletAddress || walletAddress);
+    perf.step('syncExternalCrossGameRewards');
+    profile = await getWalletProfile(walletAddress);
+    perf.step('getWalletProfile_after_sync');
     perf.done();
     return res.json(profile);
   } catch (error) {
